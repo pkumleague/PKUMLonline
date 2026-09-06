@@ -119,6 +119,27 @@ describe('replayGame', () => {
     expect(current.pool).toBe(0)
   })
 
+  it('live reset marker restarts calculation from a custom middle state', () => {
+    const { current, history } = replayGame([
+      round({ order: 1, win_type: 'ron', ron_winner: seatLabel(1), ron_loser: seatLabel(3), ron_points: 1000 }),
+      {
+        ...round({ order: 2 }),
+        reset: {
+          round: { wind: '东', number: 3, honba: 1 },
+          pool: 2,
+          scores: [30000, 20000, 25000, 23000],
+        },
+      },
+      round({ order: 3, win_type: 'ron', ron_winner: seatLabel(2), ron_loser: seatLabel(3), ron_points: 1000 }),
+    ])
+
+    expect(history).toHaveLength(2)
+    expect(history[1].round).toEqual({ wind: '东', number: 3, honba: 1 })
+    expect(history[1].scores).toEqual([30000, 20000, 28300, 21700])
+    expect(current.round).toEqual({ wind: '东', number: 3, honba: 2 })
+    expect(current.pool).toBe(0)
+  })
+
   it('南4 子家和牌后半庄结束：不再有下一局', () => {
     const dealers = [0, 1, 2, 3, 0, 1, 2, 3] // 东1-4、南1-4 的亲家座位
     const winners = [1, 0, 3, 0, 2, 3, 0, 1] // 每局由子家（非亲家）和牌 → 全部推进

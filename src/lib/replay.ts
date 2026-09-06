@@ -5,6 +5,7 @@ import { SEAT_ORDER, seatIndexOf } from './games'
 /** DB rounds 行（tsumo_points 为 jsonb 拆分数组） */
 export interface StoredRound {
   order: number
+  reset?: RoundReset | null
   win_type: 'ron' | 'tsumo' | 'draw' | null
   riichi: boolean[]
   ron_winner: string | null
@@ -15,6 +16,13 @@ export interface StoredRound {
   tenpai: boolean[] | null
   /** 手动覆盖：自动生成的行可被录入人手动修改（四家增减/对局情况/打点） */
   override?: RoundOverride
+}
+
+export interface RoundReset {
+  round: RoundState
+  scores: number[]
+  pool: number
+  label?: string
 }
 
 export interface RoundOverride {
@@ -106,6 +114,14 @@ export function replayGame(rounds: StoredRound[], startScore = 25000): ReplayRes
   let draft: StoredRound | undefined
 
   for (const r of sorted) {
+    if (r.reset) {
+      state = { ...r.reset.round }
+      scores = [0, 1, 2, 3].map((i) => Number(r.reset!.scores[i] ?? 25000))
+      pool = Number(r.reset.pool) || 0
+      settled = 0
+      draft = undefined
+      continue
+    }
     if (!r.win_type) {
       draft = r
       break

@@ -54,6 +54,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
     .tier-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
     .round-list { max-height: 300px; overflow: auto; }
     .round-list table { font-size: 14px; }
+    .round-reset-row td { background: var(--accent-soft); color: var(--muted); font-weight: 700; text-align: center; }
     .import-hint { color: var(--muted); font-size: 13px; }
     .overlay-link { word-break: break-all; }
     @media (max-width: 980px) {
@@ -96,6 +97,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
     let editingOrder: number | null = null
     let editMode: 'edit' | 'rewind' | null = null
     let editState: { round: RoundState; pool: number; scores: number[] } | null = null
+    let resetDraft: { wind: RoundState['wind']; number: RoundState['number']; honba: number; pool: number; scores: number[] } | null = null
 
     const form: {
       winType: 'ron' | 'tsumo' | 'draw' | null
@@ -339,9 +341,128 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       })
       overrideRow.append(applyOverride, clearOverride)
       panel.appendChild(overrideRow)
+      panel.appendChild(renderRestartPanel(stateOf(rep)))
 
       panel.appendChild(renderInputForm())
       return panel
+    }
+
+    function renderRestartPanel(current: { round: RoundState; pool: number; scores: number[] }): HTMLElement {
+      const panel = el('section', 'live-panel')
+      panel.appendChild(el('h2', '', '紧急重开'))
+      panel.appendChild(el('p', 'import-hint', '用于直播中途从指定局面和点数重新开始；会在已录小局中留下分隔。'))
+      const draft = resetDraft ?? {
+        wind: current.round.wind,
+        number: current.round.number,
+        honba: current.round.honba,
+        pool: current.pool,
+        scores: [...current.scores],
+      }
+      resetDraft = draft
+
+      const roundRow = el('div', 'live-row')
+      const windSelect = document.createElement('select')
+      ;(['东', '南'] as RoundState['wind'][]).forEach((wind) => {
+        const option = document.createElement('option')
+        option.value = wind
+        option.textContent = wind
+        option.selected = draft.wind === wind
+        windSelect.appendChild(option)
+      })
+      windSelect.addEventListener('change', () => { draft.wind = windSelect.value as RoundState['wind']; saveDraftState() })
+      const numberSelect = document.createElement('select')
+      ;([1, 2, 3, 4] as RoundState['number'][]).forEach((num) => {
+        const option = document.createElement('option')
+        option.value = String(num)
+        option.textContent = String(num)
+        option.selected = draft.number === num
+        numberSelect.appendChild(option)
+      })
+      numberSelect.addEventListener('change', () => { draft.number = Number(numberSelect.value) as RoundState['number']; saveDraftState() })
+      const honbaInput = document.createElement('input')
+      honbaInput.type = 'number'
+      honbaInput.min = '0'
+      honbaInput.value = String(draft.honba)
+      honbaInput.addEventListener('input', () => { draft.honba = Math.max(0, Number(honbaInput.value) || 0); saveDraftState() })
+      const poolInput = document.createElement('input')
+      poolInput.type = 'number'
+      poolInput.min = '0'
+      poolInput.value = String(draft.pool)
+      poolInput.addEventListener('input', () => { draft.pool = Math.max(0, Number(poolInput.value) || 0); saveDraftState() })
+      roundRow.append(el('strong', '', '局面'), windSelect, numberSelect, el('span', '', '局'), el('span', '', '本场'), honbaInput, el('span', '', '供托'), poolInput)
+      panel.appendChild(roundRow)
+
+      const scoreRow = el('div', 'live-row')
+      scoreRow.appendChild(el('strong', '', '点数'))
+      const scoreInputs: HTMLInputElement[] = []
+      for (let i = 0; i < 4; i++) {
+        const input = document.createElement('input')
+        input.type = 'number'
+        input.value = String(draft.scores[i] ?? 25000)
+        input.addEventListener('input', () => {
+          draft.scores[i] = Number(input.value) || 0
+          saveDraftState()
+        })
+        scoreInputs.push(input)
+        scoreRow.appendChild(input)
+      }
+      panel.appendChild(scoreRow)
+
+      const actions = el('div', 'live-actions')
+      const fillBtn = el('button', '', '填入当前')
+      fillBtn.addEventListener('click', () => {
+        resetDraft = {
+          wind: current.round.wind,
+          number: current.round.number,
+          honba: current.round.honba,
+          pool: current.pool,
+          scores: [...current.scores],
+        }
+        render()
+      })
+      const restartBtn = el('button', 'primary', '重开')
+      restartBtn.addEventListener('click', () => restartFromDraft(scoreInputs))
+      actions.append(fillBtn, restartBtn)
+      panel.appendChild(actions)
+      return panel
+    }
+
+    function restartFromDraft(scoreInputs: HTMLInputElement[]) {
+      if (!resetDraft) return
+      const scores = scoreInputs.map((input) => Number(input.value))
+      const honba = Number(resetDraft.honba)
+      const pool = Number(resetDraft.pool)
+      if (scores.some((v) => !Number.isInteger(v))) return showErr('重开点数必须都是整数')
+      if (!Number.isInteger(honba) || honba < 0 || !Number.isInteger(pool) || pool < 0) return showErr('本场和供托必须是非负整数')
+      const order = nextOrder()
+      rounds.push({
+        order,
+        reset: {
+          round: { wind: resetDraft.wind, number: resetDraft.number, honba },
+          scores,
+          pool,
+          label: `${roundLabel({ wind: resetDraft.wind, number: resetDraft.number, honba })} 重开`,
+        },
+        win_type: null,
+        riichi: [false, false, false, false],
+        ron_winner: null,
+        ron_loser: null,
+        ron_points: null,
+        tsumo_winner: null,
+        tsumo_points: null,
+        tenpai: null,
+      })
+      rounds.sort((a, b) => a.order - b.order)
+      currentDora = []
+      currentWaits = [[], [], [], []]
+      scoreOverride = null
+      editingOrder = null
+      editMode = null
+      editState = null
+      resetDraft = null
+      resetForm()
+      publish()
+      render()
     }
 
     function renderInputForm(): HTMLElement {
@@ -565,7 +686,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       if (!result) return showErr('请补全本局结果')
       const rep = replayGame(rounds)
       const st = stateOf(rep)
-      const order = editingOrder ?? rep.current.settled + 1
+      const order = editingOrder ?? nextOrder()
       const settled = settleRound(st.round, result, st.pool)
       if (settled.deltas.reduce((a, b) => a + b, 0) + (settled.poolAfter - st.pool) * 1000 !== 0) {
         return showErr('点数不平衡，请检查录入')
@@ -586,7 +707,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       if (existing >= 0) rounds[existing] = payload
       else rounds.push(payload)
       if (editingOrder != null && editMode === 'rewind') {
-        rounds = rounds.filter((round) => round.order <= order)
+        cutCurrentSegmentAfter(order)
       }
       rounds.sort((a, b) => a.order - b.order)
       liveOnly.doraByOrder[String(order)] = currentDora
@@ -623,7 +744,18 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       const table = el('table')
       table.innerHTML = '<thead><tr><th>序</th><th>局</th><th>结果</th><th>分数</th><th>操作</th></tr></thead>'
       const tbody = el('tbody')
-      rep.history.forEach((h) => {
+      const historyByOrder = new Map(rep.history.map((h) => [h.order, h]))
+      ;[...rounds].sort((a, b) => a.order - b.order).forEach((round) => {
+        if (round.reset) {
+          const tr = el('tr', 'round-reset-row')
+          const td = el('td', '', `从 ${round.reset.label ?? roundLabel(round.reset.round)} 重新开始：供托 ${round.reset.pool * 1000}，点数 ${round.reset.scores.join(' / ')}`)
+          td.colSpan = 5
+          tr.appendChild(td)
+          tbody.appendChild(tr)
+          return
+        }
+        const h = historyByOrder.get(round.order)
+        if (!h) return
         const tr = el('tr')
         const ops = el('td')
         const editBtn = el('button', '', '改')
@@ -649,16 +781,14 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
 
     function openEdit(order: number, mode: 'edit' | 'rewind') {
       const stored = rounds.find((round) => round.order === order)
-      if (!stored || !stored.win_type) return
-      const rep = replayGame(rounds)
-      const idx = rep.history.findIndex((item) => item.order === order)
-      const prev = idx > 0 ? rep.history[idx - 1] : null
+      if (!stored || stored.reset || !stored.win_type) return
+      const before = replayGame(rounds.filter((round) => round.order < order)).current
       editingOrder = order
       editMode = mode
       editState = {
-        round: idx >= 0 ? rep.history[idx].round : { wind: '东', number: 1, honba: 0 },
-        pool: prev ? prev.pool : 0,
-        scores: prev ? [...prev.scores] : [25000, 25000, 25000, 25000],
+        round: before.round,
+        pool: before.pool,
+        scores: [...before.scores],
       }
       currentDora = [...(liveOnly.doraByOrder[String(order)] ?? [])]
       currentWaits = (liveOnly.waitsByOrder[String(order)] ?? [[], [], [], []]).map((tiles) => [...tiles])
@@ -689,6 +819,17 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       if (seat == null) return null
       const idx = [0, 1, 2, 3].map(seatLabel).indexOf(seat)
       return idx >= 0 ? idx : null
+    }
+
+    function nextOrder(): number {
+      return Math.max(0, ...rounds.map((round) => Number(round.order) || 0)) + 1
+    }
+
+    function cutCurrentSegmentAfter(order: number) {
+      const nextReset = [...rounds]
+        .filter((round) => round.order > order && round.reset)
+        .sort((a, b) => a.order - b.order)[0]?.order
+      rounds = rounds.filter((round) => round.order <= order || (nextReset != null && round.order >= nextReset))
     }
 
     function resultText(result: RoundResult): string {
