@@ -55,6 +55,8 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
     .round-list { max-height: 300px; overflow: auto; }
     .round-list table { font-size: 14px; }
     .round-reset-row td { background: var(--accent-soft); color: var(--muted); font-weight: 700; text-align: center; }
+    .restart-panel { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+    .restart-panel h2 { margin: 0 0 10px; font-size: 20px; }
     .import-hint { color: var(--muted); font-size: 13px; }
     .overlay-link { word-break: break-all; }
     @media (max-width: 980px) {
@@ -92,7 +94,6 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
     let rounds: StoredRound[] = []
     let currentDora: string[] = []
     let currentWaits: string[][] = [[], [], [], []]
-    let scoreOverride: number[] | null = null
     let liveOnly = emptyLiveOnly()
     let editingOrder: number | null = null
     let editMode: 'edit' | 'rewind' | null = null
@@ -158,9 +159,9 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
         rounds = state.rounds ?? []
         currentDora = state.currentDora ?? []
         currentWaits = state.currentWaits ?? [[], [], [], []]
-        scoreOverride = Array.isArray(state.scoreOverride) ? state.scoreOverride : null
         if (Array.isArray(state.currentRiichi)) form.riichi = [0, 1, 2, 3].map((i) => Boolean(state.currentRiichi[i]))
         liveOnly = state.liveOnly ?? emptyLiveOnly()
+        liveOnly.scoreOverridesByOrder = {}
       } catch {
         rounds = []
       }
@@ -179,7 +180,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
         currentDora,
         currentWaits,
         currentRiichi: [...form.riichi],
-        scoreOverride,
+        scoreOverride: null,
         liveOnly,
         updatedAt: new Date().toISOString(),
       }
@@ -231,7 +232,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       clearErr()
       const rep = replayGame(rounds)
       const current = stateOf(rep)
-      const scores = scoreOverride ?? current.scores
+      const scores = current.scores
       const dealer = dealerSeat(current.round)
       const overlayUrl = `${location.origin}${base}live-overlay/?id=${encodeURIComponent(gameId!)}`
 
@@ -254,7 +255,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       root.appendChild(top)
 
       const grid = el('div', 'live-grid')
-      grid.appendChild(renderLivePanel(editingOrder ?? rep.current.settled + 1))
+      grid.appendChild(renderLivePanel(editingOrder ?? nextOrder()))
       grid.appendChild(renderRoundPanel(rep))
       root.appendChild(grid)
       saveDraftState()
@@ -265,7 +266,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
     }
 
     function renderLivePanel(order: number): HTMLElement {
-      const panel = el('section', 'live-panel')
+      const panel = el('section', 'restart-panel')
       panel.appendChild(el('h2', '', '画面控制'))
       if (editingOrder != null) {
         panel.appendChild(el('p', 'import-hint', `正在${editMode === 'rewind' ? '回退重录' : '修改'}第 ${editingOrder} 局`))
@@ -313,35 +314,6 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
         row.append(el('label', '', `${seat?.seat ?? seatLabel(i)} ${seat?.player ?? ''}`), input, preview)
         panel.appendChild(row)
       })
-
-      const overrideRow = el('div', 'live-row')
-      overrideRow.appendChild(el('strong', '', '紧急改分'))
-      const rep = replayGame(rounds)
-      const scores = scoreOverride ?? stateOf(rep).scores
-      const overrideInputs: HTMLInputElement[] = []
-      for (let i = 0; i < 4; i++) {
-        const input = document.createElement('input')
-        input.type = 'number'
-        input.value = String(scores[i] ?? 25000)
-        overrideInputs.push(input)
-        overrideRow.appendChild(input)
-      }
-      const applyOverride = el('button', '', '应用')
-      applyOverride.addEventListener('click', () => {
-        const next = overrideInputs.map((input) => Number(input.value))
-        if (next.some((v) => !Number.isInteger(v))) return showErr('紧急改分必须都是整数')
-        scoreOverride = next
-        liveOnly.scoreOverridesByOrder[String(order)] = next
-        render()
-      })
-      const clearOverride = el('button', '', '恢复计算分')
-      clearOverride.addEventListener('click', () => {
-        scoreOverride = null
-        render()
-      })
-      overrideRow.append(applyOverride, clearOverride)
-      panel.appendChild(overrideRow)
-      panel.appendChild(renderRestartPanel(stateOf(rep)))
 
       panel.appendChild(renderInputForm())
       return panel
@@ -434,6 +406,9 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       const pool = Number(resetDraft.pool)
       if (scores.some((v) => !Number.isInteger(v))) return showErr('重开点数必须都是整数')
       if (!Number.isInteger(honba) || honba < 0 || !Number.isInteger(pool) || pool < 0) return showErr('本场和供托必须是非负整数')
+      const label = roundLabel({ wind: resetDraft.wind, number: resetDraft.number, honba })
+      const summary = `${label}，供托 ${pool * 1000}，点数 ${scores.join(' / ')}`
+      if (!window.confirm(`确认要紧急重开吗？\n\n${summary}\n\n重开会在已录小局中加入分隔，之后从此状态继续计算。`)) return
       const order = nextOrder()
       rounds.push({
         order,
@@ -441,7 +416,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
           round: { wind: resetDraft.wind, number: resetDraft.number, honba },
           scores,
           pool,
-          label: `${roundLabel({ wind: resetDraft.wind, number: resetDraft.number, honba })} 重开`,
+          label: `${label} 重开`,
         },
         win_type: null,
         riichi: [false, false, false, false],
@@ -455,7 +430,6 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       rounds.sort((a, b) => a.order - b.order)
       currentDora = []
       currentWaits = [[], [], [], []]
-      scoreOverride = null
       editingOrder = null
       editMode = null
       editState = null
@@ -712,10 +686,8 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       rounds.sort((a, b) => a.order - b.order)
       liveOnly.doraByOrder[String(order)] = currentDora
       liveOnly.waitsByOrder[String(order)] = currentWaits
-      if (scoreOverride) liveOnly.scoreOverridesByOrder[String(order)] = scoreOverride
       currentDora = []
       currentWaits = [[], [], [], []]
-      scoreOverride = null
       editingOrder = null
       editMode = null
       editState = null
@@ -776,6 +748,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       table.appendChild(tbody)
       list.appendChild(table)
       panel.appendChild(list)
+      panel.appendChild(renderRestartPanel(rep.current))
       return panel
     }
 
@@ -792,7 +765,6 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       }
       currentDora = [...(liveOnly.doraByOrder[String(order)] ?? [])]
       currentWaits = (liveOnly.waitsByOrder[String(order)] ?? [[], [], [], []]).map((tiles) => [...tiles])
-      scoreOverride = liveOnly.scoreOverridesByOrder[String(order)] ? [...liveOnly.scoreOverridesByOrder[String(order)]] : null
       form.winType = stored.win_type
       form.riichi = [...(stored.riichi ?? [false, false, false, false])]
       form.winner = null
