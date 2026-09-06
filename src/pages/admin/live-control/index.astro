@@ -266,7 +266,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
     }
 
     function renderLivePanel(order: number): HTMLElement {
-      const panel = el('section', 'restart-panel')
+      const panel = el('section', 'live-panel')
       panel.appendChild(el('h2', '', '画面控制'))
       if (editingOrder != null) {
         panel.appendChild(el('p', 'import-hint', `正在${editMode === 'rewind' ? '回退重录' : '修改'}第 ${editingOrder} 局`))
@@ -320,7 +320,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
     }
 
     function renderRestartPanel(current: { round: RoundState; pool: number; scores: number[] }): HTMLElement {
-      const panel = el('section', 'live-panel')
+      const panel = el('section', 'restart-panel')
       panel.appendChild(el('h2', '', '紧急重开'))
       panel.appendChild(el('p', 'import-hint', '用于直播中途从指定局面和点数重新开始；会在已录小局中留下分隔。'))
       const draft = resetDraft ?? {
