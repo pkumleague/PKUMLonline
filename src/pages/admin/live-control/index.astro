@@ -146,6 +146,10 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
         showErr(error?.message ?? 'not found')
         return
       }
+      if (g.status !== 'upcoming') {
+        root.innerHTML = '<p class="empty">该对局不是待比赛程，不能进行直播控制。</p>'
+        return
+      }
       game = g
       restore()
       render()

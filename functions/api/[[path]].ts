@@ -305,7 +305,7 @@ async function updateLiveState(env, request, gameId) {
   if (!game) return error('game not found', 404)
   const auth = await getAuth(env, request)
   const role = auth?.profile.role ?? null
-  const canWrite = role === 'admin' || (role === 'referee' && game.status === 'upcoming')
+  const canWrite = game.status === 'upcoming' && (role === 'admin' || role === 'referee')
   if (!canWrite) return error('forbidden', 403)
 
   const body = await readBody(request)
@@ -418,6 +418,7 @@ async function deleteGame(env, request, id) {
   if (response) return response
   // Explicitly delete child rounds first (do not rely on SQLite FK cascade).
   await env.DB.batch([
+    env.DB.prepare('delete from live_states where game_id = ?1').bind(id),
     env.DB.prepare('delete from rounds where game_id = ?1').bind(id),
     env.DB.prepare('delete from games where id = ?1').bind(id),
   ])
@@ -738,9 +739,11 @@ async function finishGame(env, request, gameId) {
   if (sum !== 100000) return error(`points total must be 100000, got ${sum}`)
   if (ranks.some((r) => r < 1 || r > 4)) return error('rank out of range')
 
-  await env.DB.prepare("update games set seats = ?1, status = 'finished' where id = ?2")
-    .bind(toJson(newSeats), gameId)
-    .run()
+  await env.DB.batch([
+    env.DB.prepare("update games set seats = ?1, status = 'finished' where id = ?2")
+      .bind(toJson(newSeats), gameId),
+    env.DB.prepare('delete from live_states where game_id = ?1').bind(gameId),
+  ])
   return json({ data: newSeats })
 }
 
