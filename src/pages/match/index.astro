@@ -18,10 +18,10 @@ import BaseLayout from '../../layouts/BaseLayout.astro'
     .md-summary th:first-child, .md-summary td:first-child { width: 90px; }
     .md-stage { max-width: 95%; }
     .score-chart-section { max-width: 95%; margin: 24px auto 0; }
-    .score-chart-layout { display: flex; gap: 16px; align-items: flex-start; }
-    .score-chart-box { flex: 1; min-width: 0; aspect-ratio: 1.618 / 1; padding: 12px; background: #fff; border: 1px solid var(--line); border-radius: 18px; }
+    .score-chart-layout { display: flex; gap: 16px; align-items: stretch; }
+    .score-chart-box { flex: 1; min-width: 0; height: 400px; padding: 12px; background: #fff; border: 1px solid var(--line); border-radius: var(--radius); }
     .score-rank-cards { flex: none; width: 130px; display: flex; flex-direction: column; justify-content: space-between; gap: 8px; }
-    .score-rank-card { border-radius: 12px; min-height: 64px; display: flex; align-items: center; justify-content: center; text-align: center; padding: 8px; font-weight: 700; box-shadow: var(--shadow); }
+    .score-rank-card { width: 100%; aspect-ratio: 1.618 / 1; border-radius: 12px; display: flex; align-items: center; justify-content: center; text-align: center; padding: 8px; font-weight: 700; box-shadow: var(--shadow); }
     /* 手机端：总表宽度与页面宽度一致，电脑端保持 67% */
     @media (max-width: 720px) {
       .md-summary { max-width: 100%; }
