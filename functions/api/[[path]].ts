@@ -290,6 +290,38 @@ async function listRounds(env, request, gameId) {
   return json({ data: rows.map(roundFromRow) })
 }
 
+async function getLiveState(env, gameId) {
+  const game = await getGameRow(env, gameId)
+  if (!game) return error('game not found', 404)
+  const row = await env.DB.prepare('select state, updated_at from live_states where game_id = ?1')
+    .bind(gameId)
+    .first()
+  if (!row) return json({ data: null })
+  return json({ data: parseJson(row.state, null), updated_at: row.updated_at })
+}
+
+async function updateLiveState(env, request, gameId) {
+  const game = await getGameRow(env, gameId)
+  if (!game) return error('game not found', 404)
+  const auth = await getAuth(env, request)
+  const role = auth?.profile.role ?? null
+  const canWrite = role === 'admin' || (role === 'referee' && game.status === 'upcoming')
+  if (!canWrite) return error('forbidden', 403)
+
+  const body = await readBody(request)
+  const state = body.state ?? body
+  if (!state || typeof state !== 'object') return error('state is required')
+  if (String(state.gameId ?? gameId) !== gameId) return error('state gameId mismatch')
+  await env.DB.prepare(
+    `insert into live_states (game_id, state, updated_at)
+     values (?1, ?2, datetime('now'))
+     on conflict(game_id) do update set state = excluded.state, updated_at = excluded.updated_at`,
+  )
+    .bind(gameId, toJson(state))
+    .run()
+  return json({ ok: true })
+}
+
 // ---------------------------------------------------------------------------
 // Admin writes: announcements / games / unarranged
 // ---------------------------------------------------------------------------
@@ -768,6 +800,10 @@ export async function onRequest(context) {
     // game-scoped rounds and match actions
     if (parts[0] === 'games' && parts.length === 3) {
       const gameId = decodeURIComponent(parts[1])
+      if (parts[2] === 'live-state') {
+        if (method === 'GET') return getLiveState(env, gameId)
+        if (method === 'PUT') return updateLiveState(env, request, gameId)
+      }
       if (parts[2] === 'rounds') {
         if (method === 'GET') return listRounds(env, request, gameId)
         if (method === 'PUT') return upsertRound(env, request, gameId)

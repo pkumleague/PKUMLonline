@@ -1,0 +1,1099 @@
+---
+const base = import.meta.env.BASE_URL
+---
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>直播叠加源 | PKU M.LEAGUE</title>
+  </head>
+  <body>
+    <div id="overlay" class="overlay">
+      <section class="event-bug">
+        <div class="event-text">
+          <strong id="season-label">常规赛</strong>
+          <span id="match-label">Sep.11 #001</span>
+        </div>
+        <img class="event-logo" src={`${base}PLG标志平面.png`} alt="" />
+      </section>
+
+      <section class="score-bug">
+        <div id="round-label" class="round-chip">东 1 局</div>
+        <div class="stick-stack">
+          <div class="stick-line">
+            <span class="stick riichi-dot"></span>
+            <strong id="pool-label">0</strong>
+          </div>
+          <div class="stick-line">
+            <span class="stick honba-dot"></span>
+            <strong id="honba-label">0</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="dora-bug">
+        <div id="dora-tiles" class="tile-row"></div>
+      </section>
+
+      <section id="score-board" class="score-board"></section>
+    </div>
+
+    <script>
+      import teamsRaw from '../../data/teams.json'
+      import { dealerSeat } from '../lib/scoring'
+      import { replayGame } from '../lib/replay'
+      import { liveStorageKey, tileImageSrc, tileLabel } from '../lib/live'
+
+      const params = new URLSearchParams(location.search)
+      const gameId = params.get('id') ?? 'default'
+      const key = liveStorageKey(gameId)
+      const apiBase = import.meta.env.BASE_URL
+      const teams = new Map((teamsRaw.teams ?? []).map((team) => [team.name, team.color]))
+      const overlay = document.getElementById('overlay')
+      const matchLabel = document.getElementById('match-label')
+      const seasonLabel = document.getElementById('season-label')
+      const roundLabelEl = document.getElementById('round-label')
+      const honbaLabel = document.getElementById('honba-label')
+      const poolLabel = document.getElementById('pool-label')
+      const doraTiles = document.getElementById('dora-tiles')
+      const board = document.getElementById('score-board')
+      const scoreBug = document.querySelector('.score-bug')
+      const doraBug = document.querySelector('.dora-bug')
+
+      let lastText = ''
+      let remoteState = null
+      let displayedScores = null
+      let previousSettled = 0
+      let animationTimer = 0
+      let topTransitionTimer = 0
+      let topInitialized = false
+      let displayedTopKey = ''
+      const tileCodeCache = new Map()
+
+      function readState() {
+        if (remoteState) return remoteState
+        try {
+          const raw = localStorage.getItem(key)
+          return raw ? JSON.parse(raw) : null
+        } catch {
+          return null
+        }
+      }
+
+      async function refreshRemoteState() {
+        try {
+          const res = await fetch(`${apiBase}api/games/${encodeURIComponent(gameId)}/live-state`, { cache: 'no-store' })
+          if (!res.ok) return
+          const body = await res.json()
+          if (body?.data && body.data.updatedAt !== remoteState?.updatedAt) {
+            remoteState = body.data
+            render()
+          }
+        } catch {
+          // localStorage fallback keeps ordinary browser preview usable.
+        }
+      }
+
+      function render() {
+        const state = readState()
+        if (!state) {
+          overlay?.classList.add('is-empty')
+          return
+        }
+        overlay?.classList.remove('is-empty')
+
+        const rep = replayGame(state.rounds ?? [])
+        const current = rep.current
+        const scores = Array.isArray(state.scoreOverride) ? state.scoreOverride : current.scores
+        const seats = state.game?.seats ?? []
+        const game = state.game ?? {}
+        const currentOrder = current.settled + 1
+        const dealer = dealerSeat(current.round)
+        const prevScores = displayedScores
+        const scoreChanged = Array.isArray(prevScores) && scores.some((score, i) => Number(score) !== Number(prevScores[i]))
+        const deltas = scoreChanged ? scores.map((score, i) => Number(score) - Number(prevScores[i] ?? score)) : [0, 0, 0, 0]
+        const settledAdvanced = current.settled > previousSettled
+        const topChanged = topInitialized && topInfoKey(current) !== displayedTopKey
+        const scoreParts = scoreChanged && settledAdvanced ? splitScoreChanges(rep, deltas) : {
+          nameDeltas: deltas,
+          poolEntries: [[], [], [], []],
+        }
+        const isNextRound = topChanged
+
+        if (!isNextRound) updateTopInfo(game, current, state.currentDora ?? [])
+
+        const nextText = JSON.stringify({ scores, seats, dealer, waits: state.currentWaits, dora: state.currentDora, currentOrder, updatedAt: state.updatedAt })
+        if (nextText === lastText) return
+        lastText = nextText
+
+        const renderScores = scoreChanged ? prevScores : scores
+        board.innerHTML = ''
+        for (let i = 0; i < 4; i++) {
+          const seat = seats[i] ?? {}
+          const team = seat.team ?? ''
+          const player = seat.player ?? seat.name ?? ''
+          const card = document.createElement('article')
+          card.className = 'player-lower'
+          if (i === dealer) card.classList.add('dealer')
+          const teamColor = teams.get(team) ?? '#242a33'
+          card.style.setProperty('--team-color', teamColor)
+          card.style.setProperty('--team-rgb', hexToRgb(teamColor))
+          card.innerHTML = `
+            <div class="waits tile-row"></div>
+            <div class="pool-change"></div>
+            <div class="portrait-chip">
+              <span>${escapeHtml(traditionalSeat(seat.seat ?? ['东', '南', '西', '北'][i]))}</span>
+              <small>${escapeHtml(team)}</small>
+            </div>
+            <div class="info-pack">
+              <div class="player">${escapeHtml(player)}</div>
+              <div class="change-delta"></div>
+              <div class="score-plate">
+                <span class="score" data-score="${Number(scores[i] ?? 25000)}">${formatScore(renderScores[i] ?? 25000)}</span>
+              </div>
+            </div>
+          `
+          renderTiles(card.querySelector('.waits'), state.currentWaits?.[i] ?? [], `wait-${i}`)
+          board.appendChild(card)
+        }
+        previousSettled = current.settled
+        if (scoreChanged) {
+          playScoreChange(scores, scoreParts.nameDeltas, scoreParts.poolEntries)
+          if (isNextRound) clearDoraForNextRound()
+        } else {
+          displayedScores = scores.map(Number)
+        }
+        if (isNextRound) {
+          window.clearTimeout(topTransitionTimer)
+          topTransitionTimer = window.setTimeout(() => {
+            updateTopInfo(game, current, state.currentDora ?? [], true)
+          }, 6000)
+        }
+      }
+
+      function updateTopInfo(game, current, doraCodes, withTransition = false) {
+        const nextRoundKey = topInfoKey(current)
+        if (!topInitialized) {
+          setTopInfo(game, current, doraCodes, nextRoundKey, false)
+          topInitialized = true
+          return
+        }
+        if (!withTransition) {
+          renderTiles(doraTiles, doraCodes, 'dora')
+          return
+        }
+        if (withTransition) {
+          wipeTopInfo(game, current, doraCodes, nextRoundKey)
+          return
+        }
+      }
+
+      function clearDoraForNextRound() {
+        if (!doraTiles?.classList.contains('has-tiles') || doraTiles.classList.contains('dora-clearing')) return
+        doraTiles.classList.add('dora-clearing')
+        window.setTimeout(() => {
+          tileCodeCache.set('dora', [])
+          doraTiles.classList.remove('has-tiles', 'tiles-exiting', 'dora-clearing')
+          doraTiles.innerHTML = ''
+        }, 500)
+      }
+
+      function setTopInfo(game, current, doraCodes, nextRoundKey, clearEmptyDora = false) {
+        seasonLabel.textContent = game.stage ? String(game.stage) : '常规赛'
+        matchLabel.textContent = `${formatMatchDate(game.date)} #${roundNumber(game.round)}`
+        roundLabelEl.innerHTML = roundParts(current.round).map((part) => `<span>${escapeHtml(part)}</span>`).join('')
+        honbaLabel.textContent = String(current.round.honba)
+        poolLabel.textContent = String(current.pool)
+        displayedTopKey = nextRoundKey
+        if (clearEmptyDora && doraCodes.length === 0) {
+          tileCodeCache.set('dora', [])
+          doraTiles.classList.remove('has-tiles', 'tiles-exiting')
+          doraTiles.innerHTML = ''
+        } else {
+          renderTiles(doraTiles, doraCodes, 'dora')
+        }
+      }
+
+      function topInfoKey(current) {
+        return JSON.stringify({ round: current.round, pool: current.pool })
+      }
+
+      function wipeTopInfo(game, current, doraCodes, nextRoundKey) {
+        const oldLayer = buildTopWipeLayer('old')
+        const newLayer = buildTopWipeLayer('new')
+        if (!oldLayer || !newLayer) {
+          setTopInfo(game, current, doraCodes, nextRoundKey, true)
+          return
+        }
+
+        setTopInfoToLayer(newLayer, game, current, doraCodes)
+        overlay?.append(oldLayer, newLayer)
+        scoreBug?.classList.add('top-hidden')
+        doraBug?.classList.add('top-hidden')
+        oldLayer.classList.add('wipe-old')
+        newLayer.classList.add('wipe-new')
+
+        window.setTimeout(() => {
+          oldLayer.remove()
+          newLayer.remove()
+          scoreBug?.classList.remove('top-hidden')
+          doraBug?.classList.remove('top-hidden')
+          setTopInfo(game, current, doraCodes, nextRoundKey, true)
+        }, 1000)
+      }
+
+      function buildTopWipeLayer(kind) {
+        if (!scoreBug || !doraBug) return null
+        const layer = document.createElement('div')
+        layer.className = `top-wipe-layer top-wipe-${kind}`
+        layer.append(scoreBug.cloneNode(true))
+        return layer
+      }
+
+      function setTopInfoToLayer(layer, game, current, doraCodes) {
+        const season = layer.querySelector('#season-label')
+        const match = layer.querySelector('#match-label')
+        const round = layer.querySelector('#round-label')
+        const honba = layer.querySelector('#honba-label')
+        const pool = layer.querySelector('#pool-label')
+        if (season) season.textContent = game.stage ? String(game.stage) : '常规赛'
+        if (match) match.textContent = `${formatMatchDate(game.date)} #${roundNumber(game.round)}`
+        if (round) round.innerHTML = roundParts(current.round).map((part) => `<span>${escapeHtml(part)}</span>`).join('')
+        if (honba) honba.textContent = String(current.round.honba)
+        if (pool) pool.textContent = String(current.pool)
+      }
+
+      function splitScoreChanges(rep, totalDeltas) {
+        const latest = rep.history[rep.history.length - 1]
+        if (!latest) return { nameDeltas: totalDeltas, poolEntries: [[], [], [], []] }
+        const previous = rep.history[rep.history.length - 2]
+        const poolBefore = previous ? previous.pool : 0
+        const riichi = latest.result.riichi ?? [false, false, false, false]
+        const riichiCount = riichi.filter(Boolean).length
+        const poolEntries = [[], [], [], []]
+        const poolNet = [0, 0, 0, 0]
+
+        if ((latest.result.winType === 'ron' || latest.result.winType === 'tsumo') && latest.result.winner != null) {
+          const gain = (poolBefore + riichiCount) * 1000
+          if (gain > 0) {
+            poolEntries[latest.result.winner].push(gain)
+            poolNet[latest.result.winner] += gain
+          }
+        }
+
+        riichi.forEach((declared, i) => {
+          if (!declared) return
+          poolEntries[i].push(-1000)
+          poolNet[i] -= 1000
+        })
+
+        return {
+          nameDeltas: totalDeltas.map((delta, i) => delta - poolNet[i]),
+          poolEntries,
+        }
+      }
+
+      function playScoreChange(nextScores, deltas, poolEntries) {
+        window.clearTimeout(animationTimer)
+        const cards = [...board.querySelectorAll('.player-lower')]
+        cards.forEach((card, i) => {
+          card.classList.add('score-changing')
+          const deltaEl = card.querySelector('.change-delta')
+          const poolEl = card.querySelector('.pool-change')
+          if (deltaEl) {
+            deltaEl.textContent = deltas[i] === 0 ? '' : signedScore(deltas[i])
+            deltaEl.className = `change-delta ${deltas[i] >= 0 ? 'positive' : 'negative'}`
+          }
+          if (poolEl) {
+            renderPoolEntries(poolEl, poolEntries[i] ?? [])
+          }
+        })
+
+        animationTimer = window.setTimeout(() => {
+          cards.forEach((card) => card.classList.add('show-delta'))
+          window.setTimeout(() => {
+            cards.forEach((card) => card.classList.add('hide-delta'))
+            cards.forEach((card, i) => {
+              const scoreEl = card.querySelector('.score')
+              if (!scoreEl) return
+              animateNumber(scoreEl, displayedScores[i], Number(nextScores[i] ?? 0), 2000)
+            })
+            window.setTimeout(() => {
+              cards.forEach((card) => card.classList.add('info-return'))
+              displayedScores = nextScores.map(Number)
+              window.setTimeout(() => {
+                cards.forEach((card) => card.classList.remove('score-changing', 'show-delta', 'hide-delta', 'info-return'))
+              }, 500)
+            }, 2000)
+          }, 2500)
+        }, 500)
+      }
+
+      function animateNumber(el, from, to, duration) {
+        const start = performance.now()
+        const tick = (now) => {
+          const progress = Math.min(1, (now - start) / duration)
+          const eased = 1 - Math.pow(1 - progress, 3)
+          el.textContent = formatScore(Math.round(from + (to - from) * eased))
+          if (progress < 1) {
+            requestAnimationFrame(tick)
+          } else {
+            el.textContent = formatScore(to)
+          }
+        }
+        requestAnimationFrame(tick)
+      }
+
+      function signedScore(value) {
+        return `${value > 0 ? '+' : ''}${formatScore(value)}`
+      }
+
+      function renderPoolEntries(root, entries) {
+        root.innerHTML = ''
+        root.classList.toggle('has-pool-change', entries.length > 0)
+        for (const value of entries) {
+          const span = document.createElement('span')
+          span.className = value >= 0 ? 'positive' : 'negative'
+          span.textContent = signedScore(value)
+          root.appendChild(span)
+        }
+      }
+
+      function roundParts(round) {
+        const wind = round.wind === '东' ? '東' : round.wind
+        return [wind, String(round.number), '局']
+      }
+
+      function formatMatchDate(dateText) {
+        const date = String(dateText ?? '')
+        const m = date.match(/^\d{4}-(\d{1,2})-(\d{1,2})$/)
+        if (!m) return 'Sep.11'
+        return `${monthNames[Number(m[1]) - 1] ?? 'Sep'}.${Number(m[2])}`
+      }
+
+      function roundNumber(roundText) {
+        const m = String(roundText ?? '').match(/\d+/)
+        return m ? m[0].padStart(3, '0') : '001'
+      }
+
+      function traditionalSeat(value) {
+        return ({ 东: '東', 南: '南', 西: '西', 北: '北' })[String(value)] ?? String(value)
+      }
+
+      function hexToRgb(hex) {
+        const value = String(hex).replace('#', '')
+        if (!/^[0-9a-f]{6}$/i.test(value)) return '36 42 51'
+        return `${parseInt(value.slice(0, 2), 16)} ${parseInt(value.slice(2, 4), 16)} ${parseInt(value.slice(4, 6), 16)}`
+      }
+
+      function renderTiles(root, codes, cacheKey = '') {
+        if (!root) return
+        const visibleCodes = (codes ?? []).filter(Boolean)
+        const previousCodes = cacheKey ? (tileCodeCache.get(cacheKey) ?? []) : []
+        const previousText = previousCodes.join(',')
+        const nextText = visibleCodes.join(',')
+        if (cacheKey && previousText === nextText && root.childElementCount > 0) {
+          root.classList.toggle('has-tiles', visibleCodes.length > 0)
+          return
+        }
+        if (cacheKey) tileCodeCache.set(cacheKey, [...visibleCodes])
+        root.innerHTML = ''
+        if (visibleCodes.length === 0 && previousCodes.length > 0) {
+          root.classList.add('has-tiles', 'tiles-exiting')
+          for (const code of previousCodes) {
+            const img = buildTileImg(code)
+            img.classList.add('exiting')
+            root.appendChild(img)
+          }
+          window.setTimeout(() => {
+            root.classList.remove('has-tiles', 'tiles-exiting')
+            root.innerHTML = ''
+          }, 500)
+          return
+        }
+        for (const code of visibleCodes) {
+          const img = buildTileImg(code)
+          img.classList.add('entering')
+          root.appendChild(img)
+        }
+        root.classList.toggle('has-tiles', visibleCodes.length > 0)
+      }
+
+      function buildTileImg(code) {
+        const img = document.createElement('img')
+        img.className = 'tile'
+        img.src = tileImageSrc(code)
+        img.alt = tileLabel(code)
+        return img
+      }
+
+      function formatScore(value) {
+        return Number(value).toLocaleString('en-US')
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          '"': '&quot;',
+          "'": '&#39;',
+        }[ch]))
+      }
+
+      const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+      window.addEventListener('storage', (event) => {
+        if (event.key === key) {
+          remoteState = null
+          render()
+        }
+      })
+      render()
+      void refreshRemoteState()
+      setInterval(refreshRemoteState, 500)
+    </script>
+
+    <style is:global>
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: transparent;
+      }
+
+      body {
+        color: #fff;
+        font-family: "Yu Gothic", "Hiragino Kaku Gothic ProN", "Microsoft YaHei", sans-serif;
+      }
+
+      .overlay {
+        position: fixed;
+        inset: 0;
+        background: transparent;
+        pointer-events: none;
+      }
+
+      .event-bug {
+        position: absolute;
+        top: 42px;
+        right: 86px;
+        display: flex;
+        gap: 18px;
+        align-items: start;
+        color: #fff;
+        text-align: right;
+        text-shadow: 0 2px 8px rgb(0 0 0 / 75%);
+        filter: drop-shadow(0 10px 18px rgb(0 0 0 / 42%));
+      }
+
+      .event-text {
+        display: grid;
+        gap: 8px;
+        justify-items: end;
+      }
+
+      .event-bug strong {
+        font-size: 42px;
+        font-weight: 950;
+        line-height: .95;
+      }
+
+      .event-bug span {
+        padding-top: 5px;
+        font-size: 26px;
+        font-weight: 850;
+        border-top: 3px solid #fff;
+      }
+
+      .event-logo {
+        width: 88px;
+        height: 88px;
+        object-fit: contain;
+        filter: brightness(0) invert(1);
+      }
+
+      .score-bug {
+        position: absolute;
+        top: 42px;
+        left: 52px;
+        display: flex;
+        gap: 18px;
+        align-items: center;
+        filter: drop-shadow(0 12px 22px rgb(0 0 0 / 45%));
+      }
+
+      .round-chip {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0;
+        min-width: 138px;
+        height: 54px;
+        place-items: center;
+        color: #fff;
+        font-size: 32px;
+        font-weight: 900;
+        letter-spacing: 0;
+        line-height: 1;
+        background: rgb(0 0 0 / 74%);
+        border: 5px solid #f5f5f5;
+        border-radius: 13px;
+        box-shadow: inset 0 0 0 2px rgb(0 0 0 / 70%);
+      }
+
+      .round-chip span {
+        display: grid;
+        width: 1.35em;
+        place-items: center;
+      }
+
+      .stick-stack {
+        display: grid;
+        gap: 8px;
+      }
+
+      .stick-line {
+        display: flex;
+        height: 18px;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .stick {
+        position: relative;
+        display: block;
+        width: 96px;
+        height: 12px;
+        background: #fff;
+        border-radius: 999px;
+        box-shadow: 0 0 0 1px rgb(0 0 0 / 55%), 0 3px 5px rgb(0 0 0 / 35%);
+      }
+
+      .riichi-dot::after {
+        position: absolute;
+        top: 50%;
+        left: 45px;
+        width: 7px;
+        height: 7px;
+        content: "";
+        background: #d71920;
+        border-radius: 999px;
+        transform: translateY(-50%);
+      }
+
+      .honba-dot::after {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 38px;
+        height: 14px;
+        content: "";
+        background-image: radial-gradient(circle, #111 0 2px, transparent 2.5px);
+        background-position: 0 0;
+        background-size: 9.5px 7px;
+        transform: translate(-50%, -50%);
+      }
+
+      .stick-line strong {
+        color: #fff;
+        font-size: 24px;
+        font-weight: 900;
+        line-height: 1;
+        text-shadow: 0 2px 6px #000;
+      }
+
+      .dora-bug {
+        position: absolute;
+        top: 42px;
+        left: 354px;
+        display: flex;
+        height: 64px;
+        gap: 6px;
+        align-items: center;
+        color: #fff;
+        font-size: 15px;
+        font-weight: 900;
+        text-shadow: 0 2px 6px #000;
+      }
+
+      .top-hidden {
+        visibility: hidden;
+      }
+
+      .top-wipe-layer {
+        position: fixed;
+        inset: 0;
+        z-index: 5;
+        pointer-events: none;
+      }
+
+      @property --wipe {
+        syntax: "<percentage>";
+        inherits: false;
+        initial-value: 160%;
+      }
+
+      .wipe-old {
+        --wipe: 160%;
+        animation: wipe-old 1000ms ease-in-out forwards;
+        mask-image: linear-gradient(135deg, #000 0 calc(var(--wipe) - 14%), rgb(0 0 0 / 70%) calc(var(--wipe) - 5%), rgb(0 0 0 / 18%) calc(var(--wipe) + 6%), rgb(0 0 0 / 0%) calc(var(--wipe) + 16%) 100%);
+        -webkit-mask-image: linear-gradient(135deg, #000 0 calc(var(--wipe) - 14%), rgb(0 0 0 / 70%) calc(var(--wipe) - 5%), rgb(0 0 0 / 18%) calc(var(--wipe) + 6%), rgb(0 0 0 / 0%) calc(var(--wipe) + 16%) 100%);
+      }
+
+      .wipe-new {
+        --wipe: 160%;
+        animation: wipe-new 1000ms ease-in-out forwards;
+        mask-image: linear-gradient(135deg, rgb(0 0 0 / 0%) 0 calc(var(--wipe) - 16%), rgb(0 0 0 / 18%) calc(var(--wipe) - 6%), rgb(0 0 0 / 70%) calc(var(--wipe) + 5%), #000 calc(var(--wipe) + 14%) 100%);
+        -webkit-mask-image: linear-gradient(135deg, rgb(0 0 0 / 0%) 0 calc(var(--wipe) - 16%), rgb(0 0 0 / 18%) calc(var(--wipe) - 6%), rgb(0 0 0 / 70%) calc(var(--wipe) + 5%), #000 calc(var(--wipe) + 14%) 100%);
+      }
+
+      .score-board {
+        position: absolute;
+        right: 72px;
+        bottom: 58px;
+        left: 72px;
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 34px;
+        filter: none;
+      }
+
+      .player-lower {
+        --team-color: #242a33;
+        --team-rgb: 36 42 51;
+        position: relative;
+        display: grid;
+        grid-template-columns: 78px minmax(0, 1fr);
+        height: 172px;
+        min-width: 0;
+        align-items: end;
+      }
+
+      .portrait-chip {
+        position: relative;
+        z-index: 2;
+        display: grid;
+        width: 70px;
+        height: 142px;
+        align-content: start;
+        justify-items: center;
+        color: #fff;
+        background: transparent;
+        border-radius: 8px;
+        transform: translateY(-38px);
+      }
+
+      .portrait-chip span {
+        display: grid;
+        width: 58px;
+        height: 58px;
+        place-items: center;
+        color: #fff;
+        font-size: 36px;
+        font-weight: 950;
+        background: var(--team-color);
+        border-radius: 8px;
+        box-shadow: none;
+        text-shadow: none;
+      }
+
+      .portrait-chip small {
+        overflow: hidden;
+        width: 92px;
+        margin-top: 24px;
+        color: #fff;
+        font-size: 25px;
+        font-weight: 650;
+        line-height: 1;
+        text-align: center;
+        text-overflow: ellipsis;
+        text-shadow: 0 3px 8px rgb(0 0 0 / 80%);
+        white-space: nowrap;
+      }
+
+      .player-lower.score-changing .portrait-chip small,
+      .player-lower.score-changing .player,
+      .player-lower.score-changing .waits {
+        animation: info-exit 500ms ease-in forwards;
+      }
+
+      .player-lower.info-return .portrait-chip small,
+      .player-lower.info-return .player,
+      .player-lower.info-return .waits {
+        animation: info-enter 500ms ease-out forwards;
+      }
+
+      .info-pack {
+        position: relative;
+        min-width: 0;
+        padding: 0 0 0 4px;
+        transform: translateY(-2px);
+      }
+
+      .player {
+        color: #fff;
+        letter-spacing: 0;
+        text-shadow:
+          -1px -1px 0 rgb(82 82 82 / 95%),
+          1px -1px 0 rgb(82 82 82 / 95%),
+          -1px 1px 0 rgb(82 82 82 / 95%),
+          1px 1px 0 rgb(82 82 82 / 95%);
+      }
+
+      .player {
+        overflow: hidden;
+        margin-top: 2px;
+        font-size: 34px;
+        font-weight: 950;
+        line-height: 1.05;
+        text-align: right;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .change-delta {
+        position: absolute;
+        right: 0;
+        bottom: 74px;
+        display: block;
+        opacity: 0;
+        transform: translateX(-22px);
+        width: 100%;
+        color: #fff;
+        font-size: 42px;
+        font-weight: 950;
+        line-height: 1.05;
+        text-align: right;
+        text-shadow:
+          -1px -1px 0 rgb(82 82 82 / 95%),
+          1px -1px 0 rgb(82 82 82 / 95%),
+          -1px 1px 0 rgb(82 82 82 / 95%),
+          1px 1px 0 rgb(82 82 82 / 95%);
+        white-space: nowrap;
+      }
+
+      .player-lower.show-delta .change-delta {
+        animation: delta-enter 500ms ease-out forwards;
+      }
+
+      .player-lower.hide-delta .change-delta {
+        animation: delta-exit 500ms ease-in forwards;
+      }
+
+      .change-delta.positive {
+        color: #00e46f;
+      }
+
+      .change-delta.negative {
+        color: #ff1414;
+      }
+
+      .score-plate {
+        display: grid;
+        height: 66px;
+        margin-top: 8px;
+        place-items: center end;
+        padding: 0 20px;
+        background:
+          linear-gradient(90deg, rgb(var(--team-rgb) / 0%) 0%, rgb(var(--team-rgb) / 50%) 33%, rgb(var(--team-rgb) / 80%) 100%);
+        border-radius: 0;
+        box-shadow: none;
+      }
+
+      .player-lower.dealer::after {
+        position: absolute;
+        right: -34px;
+        bottom: -18px;
+        left: 0;
+        height: 6px;
+        content: "";
+        background: #ed1931;
+        box-shadow: 0 0 10px rgb(237 25 49 / 90%);
+      }
+
+      .score {
+        color: #fff;
+        font-size: 52px;
+        font-variant-numeric: tabular-nums;
+        font-weight: 950;
+        letter-spacing: 0;
+        line-height: 1;
+        text-align: right;
+        text-shadow: none;
+        transition: filter 180ms ease;
+      }
+
+      .tile-row {
+        display: flex;
+        gap: 4px;
+        align-items: center;
+      }
+
+      .waits {
+        position: absolute;
+        top: 0;
+        right: 0;
+        left: auto;
+        z-index: 1;
+        grid-column: 2;
+        justify-self: stretch;
+        justify-content: flex-end;
+        width: 100%;
+        height: 58px;
+        min-height: 0;
+        padding-right: 8px;
+      }
+
+      .pool-change {
+        position: absolute;
+        top: 0;
+        right: 0;
+        left: auto;
+        z-index: 3;
+        grid-column: 2;
+        display: block;
+        opacity: 0;
+        transform: translateX(-22px);
+        justify-self: stretch;
+        width: 100%;
+        height: 58px;
+        padding-right: 8px;
+        color: #ff1414;
+        font-size: 34px;
+        font-weight: 950;
+        line-height: 58px;
+        text-align: right;
+        text-shadow:
+          -1px -1px 0 rgb(82 82 82 / 95%),
+          1px -1px 0 rgb(82 82 82 / 95%),
+          -1px 1px 0 rgb(82 82 82 / 95%),
+          1px 1px 0 rgb(82 82 82 / 95%);
+        white-space: nowrap;
+      }
+
+      .pool-change span {
+        margin-left: 14px;
+      }
+
+      .pool-change .positive {
+        color: #00e46f;
+      }
+
+      .pool-change .negative {
+        color: #ff1414;
+      }
+
+      .player-lower.show-delta .pool-change.has-pool-change {
+        animation: delta-enter 500ms ease-out forwards;
+      }
+
+      .player-lower.hide-delta .pool-change.has-pool-change {
+        animation: delta-exit 500ms ease-in forwards;
+      }
+
+      .waits:not(.has-tiles) {
+        display: none;
+      }
+
+      .waits::before {
+        position: absolute;
+        inset: 0;
+        z-index: -1;
+        content: "";
+        background: linear-gradient(90deg, rgb(0 0 0 / 0%), rgb(0 0 0 / 40%));
+      }
+
+      .tile {
+        width: 30px;
+        height: 42px;
+        object-fit: contain;
+      }
+
+      .dora-bug .tile {
+        width: 46px;
+        height: 64px;
+      }
+
+      .waits .tile {
+        width: 34px;
+        height: 47px;
+      }
+
+      .tile.entering {
+        animation: tile-enter 500ms ease-out both;
+      }
+
+      .tile.exiting {
+        animation: tile-exit 500ms ease-in both;
+      }
+
+      .dora-clearing .tile {
+        animation: dora-clear 500ms ease-in both;
+      }
+
+      .tile:nth-child(2) { animation-delay: 45ms; }
+      .tile:nth-child(3) { animation-delay: 90ms; }
+      .tile:nth-child(4) { animation-delay: 135ms; }
+      .tile:nth-child(5) { animation-delay: 180ms; }
+      .tile:nth-child(6) { animation-delay: 225ms; }
+      .tile:nth-child(7) { animation-delay: 270ms; }
+      .tile:nth-child(8) { animation-delay: 315ms; }
+
+      @keyframes info-exit {
+        0% { opacity: 1; transform: translateY(0); }
+        100% { opacity: 0; transform: translateY(18px); }
+      }
+
+      @keyframes info-enter {
+        0% { opacity: 0; transform: translateY(18px); }
+        100% { opacity: 1; transform: translateY(0); }
+      }
+
+      @keyframes delta-enter {
+        0% { opacity: 0; transform: translateX(-22px); }
+        100% { opacity: 1; transform: translateX(0); }
+      }
+
+      @keyframes delta-exit {
+        0% { opacity: 1; transform: translateY(0); }
+        100% { opacity: 0; transform: translateY(18px); }
+      }
+
+      @keyframes tile-enter {
+        0% { opacity: 0; transform: translateX(-14px); }
+        100% { opacity: 1; transform: translateX(0); }
+      }
+
+      @keyframes tile-exit {
+        0% { opacity: 1; transform: translateX(0); }
+        100% { opacity: 0; transform: translateX(-14px); }
+      }
+
+      @keyframes dora-clear {
+        0% { opacity: 1; transform: translateX(0); }
+        100% { opacity: 0; transform: translateX(-18px); }
+      }
+
+      @keyframes wipe-old {
+        0% { --wipe: 160%; }
+        100% { --wipe: -60%; }
+      }
+
+      @keyframes wipe-new {
+        0% { --wipe: 160%; }
+        100% { --wipe: -60%; }
+      }
+
+      .is-empty .event-bug,
+      .is-empty .score-bug,
+      .is-empty .dora-bug,
+      .is-empty .score-board {
+        display: none;
+      }
+
+      @media (max-width: 1280px) {
+        .event-bug {
+          top: 24px;
+          right: 52px;
+          transform: scale(.82);
+          transform-origin: top right;
+        }
+
+        .score-bug {
+          top: 24px;
+          left: 32px;
+          transform: scale(.82);
+          transform-origin: top left;
+        }
+
+        .dora-bug {
+          top: 24px;
+          left: 282px;
+          transform: scale(.84);
+          transform-origin: top left;
+        }
+
+        .score-board {
+          right: 54px;
+          bottom: 28px;
+          left: 54px;
+          gap: 18px;
+        }
+
+        .player-lower {
+          grid-template-columns: 58px minmax(0, 1fr);
+          height: 124px;
+        }
+
+        .portrait-chip {
+          width: 54px;
+          height: 84px;
+          transform: translateY(-26px);
+        }
+
+        .portrait-chip span {
+          width: 46px;
+          height: 46px;
+          font-size: 28px;
+        }
+
+        .portrait-chip small {
+          width: 76px;
+          font-size: 16px;
+        }
+
+        .info-pack {
+          padding-left: 3px;
+        }
+
+        .player {
+          font-size: 24px;
+        }
+
+        .change-delta {
+          bottom: 54px;
+          font-size: 30px;
+        }
+
+        .score-plate {
+          height: 48px;
+          padding-right: 13px;
+        }
+
+        .score {
+          font-size: 38px;
+        }
+
+        .player-lower.dealer::after {
+          left: 0;
+        }
+
+        .waits {
+          top: 0;
+          right: 0;
+          left: auto;
+          width: 100%;
+          height: 46px;
+        }
+
+        .pool-change {
+          height: 46px;
+          font-size: 24px;
+          line-height: 46px;
+        }
+      }
+
+      @media (max-width: 900px) {
+        .score-board {
+          right: 30px;
+          left: 30px;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          row-gap: 16px;
+        }
+      }
+    </style>
+  </body>
+</html>

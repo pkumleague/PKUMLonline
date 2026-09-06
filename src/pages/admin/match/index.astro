@@ -302,7 +302,9 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       nextBtn.addEventListener('click', saveAndNext)
       const viewBtn = el('button', 'primary', '查看结果')
       viewBtn.addEventListener('click', goResult)
-      actions.append(saveBtn, nextBtn, viewBtn)
+      const importLabel = el('button', '', '导入直播 JSON')
+      importLabel.addEventListener('click', importLiveJson)
+      actions.append(saveBtn, nextBtn, viewBtn, importLabel)
       wrap.appendChild(actions)
 
       // 南四锁定：非连庄结果后半庄即终了，禁用「下一局」，由「查看结果」自动保存当前局并提交
@@ -809,6 +811,82 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
         await saveDraft()
       }
       location.href = base + 'admin/match/result/?id=' + encodeURIComponent(gameId)
+    }
+
+    async function importLiveJson() {
+      if (!gameId) return
+      const input = document.createElement('input')
+      input.type = 'file'
+      input.accept = 'application/json,.json'
+      input.addEventListener('change', async () => {
+        const file = input.files?.[0]
+        if (!file) return
+        clearErr()
+        let payload: any
+        try {
+          payload = JSON.parse(await file.text())
+        } catch {
+          showErr('JSON 解析失败，请检查文件格式')
+          return
+        }
+        const importedRounds = normalizeLiveRounds(payload)
+        if (importedRounds.length === 0) {
+          showErr('未找到可导入的小局数据')
+          return
+        }
+        const ok = window.confirm(`将覆盖本半庄当前 ${rounds.length} 条逐局记录，并导入 ${importedRounds.length} 条直播记录。直播用宝牌/听牌牌图不会进入正式赛果。是否继续？`)
+        if (!ok) return
+        const del = await supabase.from('rounds').delete().eq('game_id', gameId).gt('"order"', 0)
+        if (del.error) {
+          showErr('清空原逐局记录失败：' + del.error.message)
+          return
+        }
+        for (const round of importedRounds) {
+          const { error } = await supabase.from('rounds').upsert({ ...round, game_id: gameId }, { onConflict: 'game_id,order' })
+          if (error) {
+            showErr(`导入第 ${round.order} 局失败：` + error.message)
+            return
+          }
+        }
+        resetForm()
+        editingOrder = null
+        editMode = null
+        editState = null
+        draftLoaded = false
+        await refreshRounds()
+        render()
+        showErr('直播 JSON 已导入；已忽略 liveOnly 中的宝牌、听牌牌图和紧急改分。')
+      })
+      input.click()
+    }
+
+    function normalizeLiveRounds(payload: any): StoredRound[] {
+      const rows = Array.isArray(payload?.rounds) ? payload.rounds : []
+      return rows
+        .map((r: any, i: number) => ({
+          order: Number.isInteger(Number(r.order)) ? Number(r.order) : i + 1,
+          win_type: r.win_type === 'ron' || r.win_type === 'tsumo' || r.win_type === 'draw' ? r.win_type : null,
+          riichi: normalizeBoolArray(r.riichi),
+          ron_winner: r.win_type === 'ron' ? normalizeSeat(r.ron_winner) : null,
+          ron_loser: r.win_type === 'ron' ? normalizeSeat(r.ron_loser) : null,
+          ron_points: r.win_type === 'ron' && Number.isFinite(Number(r.ron_points)) ? Number(r.ron_points) : null,
+          tsumo_winner: r.win_type === 'tsumo' ? normalizeSeat(r.tsumo_winner) : null,
+          tsumo_points: r.win_type === 'tsumo' && Array.isArray(r.tsumo_points) ? r.tsumo_points.map((x: any) => Number(x)).filter((x: number) => Number.isFinite(x)) : null,
+          tenpai: r.win_type === 'draw' ? normalizeBoolArray(r.tenpai) : null,
+          override: null,
+        }))
+        .filter((r: StoredRound) => r.win_type != null)
+        .sort((a: StoredRound, b: StoredRound) => a.order - b.order)
+        .map((r: StoredRound, i: number) => ({ ...r, order: i + 1 }))
+    }
+
+    function normalizeBoolArray(value: any): boolean[] {
+      const arr = Array.isArray(value) ? value : []
+      return [0, 1, 2, 3].map((i) => Boolean(arr[i]))
+    }
+
+    function normalizeSeat(value: any): string | null {
+      return ['东', '南', '西', '北'].includes(value) ? value : null
     }
 
     load()

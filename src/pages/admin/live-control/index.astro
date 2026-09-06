@@ -1,0 +1,729 @@
+---
+import BaseLayout from '../../../layouts/BaseLayout.astro'
+import AdminShell from '../../../components/admin/AdminShell.astro'
+---
+<BaseLayout title="直播控制台">
+  <AdminShell>
+    <h1>直播控制台</h1>
+    <p id="live-err" class="admin-err"></p>
+    <div id="live-root" class="live-root">
+      <p class="empty">加载中...</p>
+    </div>
+  </AdminShell>
+
+  <style is:global>
+    .live-root { display: grid; gap: 16px; }
+    .live-grid { display: grid; grid-template-columns: minmax(360px, 1.1fr) minmax(360px, .9fr); gap: 16px; align-items: start; }
+    .live-panel { border: 1px solid var(--line); border-radius: 8px; background: var(--card); padding: 14px; }
+    .live-panel h2 { margin: 0 0 10px; font-size: 20px; }
+    .live-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 10px 0; }
+    .live-row label { display: inline-flex; gap: 6px; align-items: center; font-size: 15px; }
+    .live-row input[type='text'], .live-row input[type='number'] { padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; font-size: 15px; }
+    .live-row input[type='number'] { width: 108px; text-align: right; font-variant-numeric: tabular-nums; }
+    .live-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+    .live-actions button, .live-row button, .seat-pick button, .point-btn, .tier-btn {
+      padding: 8px 13px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--card);
+      cursor: pointer;
+      font-size: 15px;
+    }
+    .live-actions button.primary, .live-row button.primary, .seat-pick button.sel, .point-btn.sel, .tier-btn.sel {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #fff;
+    }
+    .seat-pick { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; width: 100%; }
+    .seat-pick button { min-width: 0; text-align: left; }
+    .seat-name { display: block; font-weight: 800; }
+    .seat-team { display: block; color: var(--muted); font-size: 12px; }
+    .score-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .score-card { color: #fff; border-radius: 8px; padding: 12px; background: var(--team-color, #222); box-shadow: inset 0 0 0 999px rgb(0 0 0 / 22%); }
+    .score-card.dealer { outline: 5px solid #d71920; outline-offset: -5px; }
+    .score-card .label { font-size: 13px; opacity: .9; }
+    .score-card .value { font-size: 28px; font-weight: 900; font-variant-numeric: tabular-nums; }
+    .tile-preview { display: flex; gap: 5px; min-height: 46px; align-items: center; }
+    .tile-preview img { width: 32px; height: 44px; object-fit: contain; }
+    .dora-inputs { display: flex; gap: 8px; align-items: center; }
+    .dora-inputs input[type='text'] { width: 58px; text-align: center; }
+    .points-grid { max-height: 310px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+    .points-grid table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .points-grid th, .points-grid td { border-bottom: 1px solid var(--line); padding: 4px; text-align: center; white-space: nowrap; }
+    .point-btn { width: 100%; padding: 6px 8px; font-variant-numeric: tabular-nums; }
+    .tier-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .round-list { max-height: 300px; overflow: auto; }
+    .round-list table { font-size: 14px; }
+    .import-hint { color: var(--muted); font-size: 13px; }
+    .overlay-link { word-break: break-all; }
+    @media (max-width: 980px) {
+      .live-grid { grid-template-columns: 1fr; }
+      .score-strip { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+
+  <script>
+    import teamsRaw from '../../../../data/teams.json'
+    import pointsRaw from '../../../../data/points_table.json'
+    import { supabase } from '../../../lib/supabase'
+    import { dealerSeat, nextRound, settleRound } from '../../../lib/scoring'
+    import { replayGame, roundLabel, seatLabel } from '../../../lib/replay'
+    import { liveStorageKey, emptyLiveOnly, parseTileInput, tileImageSrc, tileLabel } from '../../../lib/live'
+    import type { RoundResult, RoundState } from '../../../lib/scoring'
+    import type { StoredRound } from '../../../lib/replay'
+    import type { PointsTable } from '../../../lib/types'
+
+    const points = pointsRaw as PointsTable
+    const base = import.meta.env.BASE_URL
+    const errEl = document.getElementById('live-err')!
+    const root = document.getElementById('live-root')!
+    const params = new URLSearchParams(location.search)
+    const gameId = params.get('id')
+    const teams = new Map((teamsRaw.teams ?? []).map((team: any) => [team.name, team.color]))
+    const TOKEN_KEY = 'pkuml_session_token'
+    let publishTimer: ReturnType<typeof setTimeout> | null = null
+
+    const FU = ['20', '25', '30', '40', '50', '60', '70']
+    const HAN = ['1', '2', '3', '4']
+
+    let game: any = null
+    let role: string | null = null
+    let rounds: StoredRound[] = []
+    let currentDora: string[] = []
+    let currentWaits: string[][] = [[], [], [], []]
+    let scoreOverride: number[] | null = null
+    let liveOnly = emptyLiveOnly()
+    let editingOrder: number | null = null
+    let editMode: 'edit' | 'rewind' | null = null
+    let editState: { round: RoundState; pool: number; scores: number[] } | null = null
+
+    const form: {
+      winType: 'ron' | 'tsumo' | 'draw' | null
+      riichi: boolean[]
+      winner: number | null
+      loser: number | null
+      ronPoints: number | null
+      tsumoSplit: number[] | null
+      tenpai: boolean[]
+      selKey: string | null
+    } = {
+      winType: null,
+      riichi: [false, false, false, false],
+      winner: null,
+      loser: null,
+      ronPoints: null,
+      tsumoSplit: null,
+      tenpai: [false, false, false, false],
+      selKey: null,
+    }
+
+    function showErr(message: string) { errEl.textContent = message }
+    function clearErr() { errEl.textContent = '' }
+    function el(tag: string, cls = '', text = ''): HTMLElement {
+      const node = document.createElement(tag)
+      if (cls) node.className = cls
+      if (text) node.textContent = text
+      return node
+    }
+
+    async function load() {
+      if (!gameId) {
+        root.innerHTML = '<p class="empty">缺少对局 id（?id=...）</p>'
+        return
+      }
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session) { location.href = base + 'admin/login/'; return }
+      const { data: profile } = await supabase.from('profiles').select('role').eq('id', session.user.id).single()
+      role = profile?.role ?? null
+      if (role !== 'admin' && role !== 'referee') { location.href = base + 'admin/'; return }
+
+      const { data: g, error } = await supabase.from('games').select('*').eq('id', gameId).single()
+      if (error || !g) {
+        root.innerHTML = '<p class="empty">对局不存在</p>'
+        showErr(error?.message ?? 'not found')
+        return
+      }
+      game = g
+      restore()
+      render()
+    }
+
+    function restore() {
+      try {
+        const raw = localStorage.getItem(draftStorageKey()) ?? localStorage.getItem(liveStorageKey(gameId!))
+        if (!raw) return
+        const state = JSON.parse(raw)
+        rounds = state.rounds ?? []
+        currentDora = state.currentDora ?? []
+        currentWaits = state.currentWaits ?? [[], [], [], []]
+        scoreOverride = Array.isArray(state.scoreOverride) ? state.scoreOverride : null
+        if (Array.isArray(state.currentRiichi)) form.riichi = [0, 1, 2, 3].map((i) => Boolean(state.currentRiichi[i]))
+        liveOnly = state.liveOnly ?? emptyLiveOnly()
+      } catch {
+        rounds = []
+      }
+    }
+
+    function draftStorageKey() {
+      return `${liveStorageKey(gameId!)}:draft`
+    }
+
+    function buildLiveState() {
+      return {
+        version: 1,
+        gameId,
+        game,
+        rounds,
+        currentDora,
+        currentWaits,
+        currentRiichi: [...form.riichi],
+        scoreOverride,
+        liveOnly,
+        updatedAt: new Date().toISOString(),
+      }
+    }
+
+    function saveDraftState() {
+      if (!gameId) return
+      localStorage.setItem(draftStorageKey(), JSON.stringify(buildLiveState()))
+    }
+
+    function publish() {
+      if (!gameId) return
+      const state = buildLiveState()
+      localStorage.setItem(draftStorageKey(), JSON.stringify(state))
+      localStorage.setItem(liveStorageKey(gameId), JSON.stringify(state))
+      queueRemotePublish(state)
+    }
+
+    function queueRemotePublish(state: any) {
+      if (publishTimer) clearTimeout(publishTimer)
+      publishTimer = setTimeout(() => {
+        publishTimer = null
+        void publishRemote(state)
+      }, 120)
+    }
+
+    async function publishRemote(state: any) {
+      const token = localStorage.getItem(TOKEN_KEY)
+      if (!token || !gameId) return
+      try {
+        const res = await fetch(`${base}api/games/${encodeURIComponent(gameId)}/live-state`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ state }),
+        })
+        if (!res.ok) {
+          const body = await res.json().catch(() => null)
+          showErr('直播源同步失败：' + (body?.error?.message ?? `HTTP ${res.status}`))
+        }
+      } catch (e: any) {
+        showErr('直播源同步失败：' + (e?.message ?? String(e)))
+      }
+    }
+
+    function render() {
+      clearErr()
+      const rep = replayGame(rounds)
+      const current = stateOf(rep)
+      const scores = scoreOverride ?? current.scores
+      const dealer = dealerSeat(current.round)
+      const overlayUrl = `${location.origin}${base}live-overlay/?id=${encodeURIComponent(gameId!)}`
+
+      root.innerHTML = ''
+      const top = el('div', 'live-panel')
+      top.appendChild(el('h2', '', `${game.stage} ${game.round ?? ''} · ${roundLabel(current.round)} · 供托 ${current.pool * 1000}`))
+      const strip = el('div', 'score-strip')
+      ;(game.seats ?? []).forEach((seat: any, i: number) => {
+        const card = el('div', 'score-card' + (i === dealer ? ' dealer' : ''))
+        card.style.setProperty('--team-color', teams.get(seat.team) ?? '#242a33')
+        card.append(
+          el('div', 'label', `${seat.seat} ${seat.team} ${seat.player ?? ''}`),
+          el('div', 'value', Number(scores[i] ?? 25000).toLocaleString('en-US')),
+        )
+        strip.appendChild(card)
+      })
+      top.appendChild(strip)
+      const linkRow = el('p', 'import-hint overlay-link', `直播姬浏览器源：${overlayUrl}`)
+      top.appendChild(linkRow)
+      root.appendChild(top)
+
+      const grid = el('div', 'live-grid')
+      grid.appendChild(renderLivePanel(editingOrder ?? rep.current.settled + 1))
+      grid.appendChild(renderRoundPanel(rep))
+      root.appendChild(grid)
+      saveDraftState()
+    }
+
+    function stateOf(rep = replayGame(rounds)) {
+      return editingOrder != null && editState ? editState : rep.current
+    }
+
+    function renderLivePanel(order: number): HTMLElement {
+      const panel = el('section', 'live-panel')
+      panel.appendChild(el('h2', '', '画面控制'))
+      if (editingOrder != null) {
+        panel.appendChild(el('p', 'import-hint', `正在${editMode === 'rewind' ? '回退重录' : '修改'}第 ${editingOrder} 局`))
+      }
+
+      const doraRow = el('div', 'live-row')
+      const doraInputs = el('div', 'dora-inputs')
+      const doraPreview = el('div', 'tile-preview')
+      const updateDora = () => {
+        currentDora = Array.from(doraInputs.querySelectorAll('input'))
+          .map((input) => parseTileInput((input as HTMLInputElement).value)[0])
+          .filter(Boolean)
+        liveOnly.doraByOrder[String(order)] = currentDora
+        renderTilePreview(doraPreview, currentDora)
+        saveDraftState()
+      }
+      for (let i = 0; i < 4; i++) {
+        const input = document.createElement('input')
+        input.type = 'text'
+        input.placeholder = `${i + 1}`
+        input.value = currentDora[i] ?? ''
+        input.maxLength = 3
+        input.addEventListener('input', updateDora)
+        doraInputs.appendChild(input)
+      }
+      renderTilePreview(doraPreview, currentDora)
+      doraRow.append(el('label', '', '宝牌'), doraInputs, doraPreview)
+      panel.appendChild(doraRow)
+
+      ;[0, 1, 2, 3].forEach((i) => {
+        const row = el('div', 'live-row')
+        const input = document.createElement('input')
+        input.type = 'text'
+        input.placeholder = '听牌，如 36m'
+        input.value = currentWaits[i]?.join('') ?? ''
+        const preview = el('div', 'tile-preview')
+        renderTilePreview(preview, currentWaits[i] ?? [])
+        input.addEventListener('input', () => {
+          currentWaits[i] = parseTileInput(input.value)
+          liveOnly.waitsByOrder[String(order)] = currentWaits
+          renderTilePreview(preview, currentWaits[i])
+          saveDraftState()
+        })
+        const seat = game.seats?.[i]
+        row.append(el('label', '', `${seat?.seat ?? seatLabel(i)} ${seat?.player ?? ''}`), input, preview)
+        panel.appendChild(row)
+      })
+
+      const overrideRow = el('div', 'live-row')
+      overrideRow.appendChild(el('strong', '', '紧急改分'))
+      const rep = replayGame(rounds)
+      const scores = scoreOverride ?? stateOf(rep).scores
+      const overrideInputs: HTMLInputElement[] = []
+      for (let i = 0; i < 4; i++) {
+        const input = document.createElement('input')
+        input.type = 'number'
+        input.value = String(scores[i] ?? 25000)
+        overrideInputs.push(input)
+        overrideRow.appendChild(input)
+      }
+      const applyOverride = el('button', '', '应用')
+      applyOverride.addEventListener('click', () => {
+        const next = overrideInputs.map((input) => Number(input.value))
+        if (next.some((v) => !Number.isInteger(v))) return showErr('紧急改分必须都是整数')
+        scoreOverride = next
+        liveOnly.scoreOverridesByOrder[String(order)] = next
+        render()
+      })
+      const clearOverride = el('button', '', '恢复计算分')
+      clearOverride.addEventListener('click', () => {
+        scoreOverride = null
+        render()
+      })
+      overrideRow.append(applyOverride, clearOverride)
+      panel.appendChild(overrideRow)
+
+      panel.appendChild(renderInputForm())
+      return panel
+    }
+
+    function renderInputForm(): HTMLElement {
+      const wrap = el('div')
+      wrap.appendChild(el('h2', '', '逐局录入'))
+
+      const typeRow = el('div', 'live-row')
+      ;(['ron', 'tsumo', 'draw'] as const).forEach((type) => {
+        const label = document.createElement('label')
+        const radio = document.createElement('input')
+        radio.type = 'radio'
+        radio.name = 'winType'
+        radio.checked = form.winType === type
+        radio.addEventListener('change', () => { form.winType = type; render() })
+        label.append(radio, document.createTextNode(({ ron: '荣和', tsumo: '自摸', draw: '流局' })[type]))
+        typeRow.appendChild(label)
+      })
+      wrap.appendChild(typeRow)
+
+      if (form.winType === 'ron') {
+        wrap.appendChild(renderSeatPicker('赢家', form.winner, (i) => { form.winner = i; render() }))
+        wrap.appendChild(renderSeatPicker('放铳', form.loser, (i) => { form.loser = i; render() }))
+      } else if (form.winType === 'tsumo') {
+        wrap.appendChild(renderSeatPicker('自摸', form.winner, (i) => { form.winner = i; render() }))
+      } else if (form.winType === 'draw') {
+        const row = el('div', 'live-row')
+        row.appendChild(el('strong', '', '流局听牌'))
+        for (let i = 0; i < 4; i++) {
+          const label = document.createElement('label')
+          const cb = document.createElement('input')
+          cb.type = 'checkbox'
+          cb.checked = form.tenpai[i]
+          cb.addEventListener('change', () => { form.tenpai[i] = cb.checked; saveDraftState() })
+          label.append(cb, document.createTextNode(game.seats?.[i]?.seat ?? seatLabel(i)))
+          row.appendChild(label)
+        }
+        wrap.appendChild(row)
+      }
+
+      const riichiRow = el('div', 'live-row')
+      riichiRow.appendChild(el('strong', '', '立直'))
+      for (let i = 0; i < 4; i++) {
+        const label = document.createElement('label')
+        const cb = document.createElement('input')
+        cb.type = 'checkbox'
+        cb.checked = form.riichi[i]
+        cb.addEventListener('change', () => { form.riichi[i] = cb.checked; saveDraftState() })
+        label.append(cb, document.createTextNode(game.seats?.[i]?.seat ?? seatLabel(i)))
+        riichiRow.appendChild(label)
+      }
+      wrap.appendChild(riichiRow)
+
+      if (form.winType === 'ron' || form.winType === 'tsumo') wrap.appendChild(renderPointsPicker())
+
+      const actions = el('div', 'live-actions')
+      const nextBtn = el('button', 'primary', '保存并下一局')
+      nextBtn.addEventListener('click', saveAndNext)
+      const publishBtn = el('button', '', '放送')
+      publishBtn.addEventListener('click', () => {
+        publish()
+        showErr('已放送到直播画面')
+      })
+      const exportBtn = el('button', '', '导出 JSON')
+      exportBtn.addEventListener('click', exportJson)
+      actions.append(nextBtn, publishBtn, exportBtn)
+      wrap.appendChild(actions)
+      return wrap
+    }
+
+    function renderSeatPicker(title: string, selected: number | null, onPick: (i: number) => void): HTMLElement {
+      const wrap = el('div', 'live-row')
+      wrap.appendChild(el('strong', '', title))
+      const picks = el('div', 'seat-pick')
+      for (let i = 0; i < 4; i++) {
+        const seat = game.seats?.[i]
+        const btn = el('button', selected === i ? 'sel' : '')
+        btn.type = 'button'
+        btn.innerHTML = `<span class="seat-name">${seat?.seat ?? seatLabel(i)} ${seat?.player ?? ''}</span><span class="seat-team">${seat?.team ?? ''}</span>`
+        btn.addEventListener('click', () => onPick(i))
+        picks.appendChild(btn)
+      }
+      wrap.appendChild(picks)
+      return wrap
+    }
+
+    function renderPointsPicker(): HTMLElement {
+      const wrap = el('div')
+      const rep = replayGame(rounds)
+      const winner = form.winner
+      const view = winner != null && winner === dealerSeat(stateOf(rep).round) ? 'dealer' : 'child'
+      const isRon = form.winType === 'ron'
+      const grid = el('div', 'points-grid')
+      const table = el('table')
+      const thead = el('thead')
+      const hr = el('tr')
+      hr.appendChild(el('th'))
+      FU.forEach((f) => hr.appendChild(el('th', '', `${f}符`)))
+      thead.appendChild(hr)
+      table.appendChild(thead)
+      const tbody = el('tbody')
+      HAN.forEach((han) => {
+        const tr = el('tr')
+        tr.appendChild(el('th', '', `${han}番`))
+        FU.forEach((fu) => {
+          const td = el('td')
+          if (!(isRon && fu === '20')) {
+            const cell = points.grid[view][han]?.[fu]
+            if (cell) {
+              const btn = el('button', 'point-btn', isRon ? String(cell.ron) : cell.tsumo.join('/')) as HTMLButtonElement
+              const key = `cell:${view}:${han}:${fu}`
+              if (form.selKey === key) btn.classList.add('sel')
+              btn.addEventListener('click', () => {
+                form.selKey = key
+                if (isRon) {
+                  form.ronPoints = cell.ron
+                  form.tsumoSplit = null
+                } else {
+                  form.tsumoSplit = [...cell.tsumo]
+                  form.ronPoints = null
+                }
+                render()
+              })
+              td.appendChild(btn)
+            }
+          }
+          tr.appendChild(td)
+        })
+        tbody.appendChild(tr)
+      })
+      table.appendChild(tbody)
+      grid.appendChild(table)
+      wrap.appendChild(grid)
+
+      const tiers = el('div', 'tier-row')
+      points.tiers.forEach((tier) => {
+        const val = view === 'dealer'
+          ? (isRon ? tier.dealerRon : tier.dealerTsumo[0])
+          : (isRon ? tier.childRon : `${tier.childTsumo[0]}/${tier.childTsumo[1]}`)
+        const btn = el('button', 'tier-btn', `${tier.label} ${val}`) as HTMLButtonElement
+        const key = `tier:${tier.key}`
+        if (form.selKey === key) btn.classList.add('sel')
+        btn.addEventListener('click', () => {
+          form.selKey = key
+          if (isRon) {
+            form.ronPoints = view === 'dealer' ? tier.dealerRon : tier.childRon
+            form.tsumoSplit = null
+          } else {
+            form.tsumoSplit = view === 'dealer' ? [...tier.dealerTsumo] : [...tier.childTsumo]
+            form.ronPoints = null
+          }
+          render()
+        })
+        tiers.appendChild(btn)
+      })
+      wrap.appendChild(tiers)
+
+      const manual = el('div', 'live-row')
+      manual.appendChild(el('strong', '', '手动'))
+      if (isRon) {
+        const input = document.createElement('input')
+        input.type = 'number'
+        input.placeholder = '荣和点'
+        input.value = form.ronPoints != null ? String(form.ronPoints) : ''
+        input.addEventListener('change', () => {
+          form.ronPoints = Number(input.value) || null
+          form.tsumoSplit = null
+          form.selKey = null
+          render()
+        })
+        manual.appendChild(input)
+      } else {
+        const parts = view === 'dealer' ? 1 : 2
+        const inputs: HTMLInputElement[] = []
+        for (let i = 0; i < parts; i++) {
+          const input = document.createElement('input')
+          input.type = 'number'
+          input.placeholder = view === 'dealer' ? '各付' : i === 0 ? '子付' : '亲付'
+          input.value = form.tsumoSplit?.[i] != null ? String(form.tsumoSplit[i]) : ''
+          inputs.push(input)
+          manual.appendChild(input)
+        }
+        const apply = el('button', '', '确认')
+        apply.addEventListener('click', () => {
+          const vals = inputs.map((input) => Number(input.value))
+          if (vals.some((x) => !x || x <= 0 || x % 100 !== 0)) return showErr('手动点数须为正的 100 倍数')
+          form.tsumoSplit = vals
+          form.ronPoints = null
+          form.selKey = null
+          render()
+        })
+        manual.appendChild(apply)
+      }
+      wrap.appendChild(manual)
+      return wrap
+    }
+
+    function buildResult(): RoundResult | null {
+      const riichi = [...form.riichi]
+      if (form.winType === 'ron') {
+        if (form.winner == null || form.loser == null || !form.ronPoints || form.winner === form.loser) return null
+        return { winType: 'ron', riichi, winner: form.winner, loser: form.loser, ronPoints: form.ronPoints }
+      }
+      if (form.winType === 'tsumo') {
+        if (form.winner == null || !form.tsumoSplit) return null
+        const rep = replayGame(rounds)
+        const dealer = dealerSeat(stateOf(rep).round)
+        const pays = [0, 0, 0, 0]
+        if (form.tsumoSplit.length === 1) {
+          for (let i = 0; i < 4; i++) if (i !== form.winner) pays[i] = form.tsumoSplit[0]
+        } else {
+          for (let i = 0; i < 4; i++) if (i !== form.winner) pays[i] = i === dealer ? form.tsumoSplit![1] : form.tsumoSplit![0]
+        }
+        return { winType: 'tsumo', riichi, winner: form.winner, tsumoPayments: pays }
+      }
+      if (form.winType === 'draw') return { winType: 'draw', riichi, tenpai: [...form.tenpai] }
+      return null
+    }
+
+    function saveAndNext() {
+      const result = buildResult()
+      if (!result) return showErr('请补全本局结果')
+      const rep = replayGame(rounds)
+      const st = stateOf(rep)
+      const order = editingOrder ?? rep.current.settled + 1
+      const settled = settleRound(st.round, result, st.pool)
+      if (settled.deltas.reduce((a, b) => a + b, 0) + (settled.poolAfter - st.pool) * 1000 !== 0) {
+        return showErr('点数不平衡，请检查录入')
+      }
+      const payload: StoredRound = {
+        order,
+        win_type: form.winType,
+        riichi: [...form.riichi],
+        ron_winner: form.winType === 'ron' ? seatLabel(form.winner!) : null,
+        ron_loser: form.winType === 'ron' ? seatLabel(form.loser!) : null,
+        ron_points: form.winType === 'ron' ? form.ronPoints : null,
+        tsumo_winner: form.winType === 'tsumo' ? seatLabel(form.winner!) : null,
+        tsumo_points: form.winType === 'tsumo' ? form.tsumoSplit : null,
+        tenpai: form.winType === 'draw' ? [...form.tenpai] : null,
+        override: undefined,
+      }
+      const existing = rounds.findIndex((round) => round.order === order)
+      if (existing >= 0) rounds[existing] = payload
+      else rounds.push(payload)
+      if (editingOrder != null && editMode === 'rewind') {
+        rounds = rounds.filter((round) => round.order <= order)
+      }
+      rounds.sort((a, b) => a.order - b.order)
+      liveOnly.doraByOrder[String(order)] = currentDora
+      liveOnly.waitsByOrder[String(order)] = currentWaits
+      if (scoreOverride) liveOnly.scoreOverridesByOrder[String(order)] = scoreOverride
+      currentDora = []
+      currentWaits = [[], [], [], []]
+      scoreOverride = null
+      editingOrder = null
+      editMode = null
+      editState = null
+      resetForm()
+      const next = nextRound(st.round, result)
+      publish()
+      render()
+      if (!next) showErr('南四非连庄结果已录完，可以导出 JSON 并导入官网。')
+    }
+
+    function resetForm() {
+      form.winType = null
+      form.riichi = [false, false, false, false]
+      form.winner = null
+      form.loser = null
+      form.ronPoints = null
+      form.tsumoSplit = null
+      form.tenpai = [false, false, false, false]
+      form.selKey = null
+    }
+
+    function renderRoundPanel(rep: ReturnType<typeof replayGame>): HTMLElement {
+      const panel = el('section', 'live-panel')
+      panel.appendChild(el('h2', '', '已录小局'))
+      const list = el('div', 'round-list')
+      const table = el('table')
+      table.innerHTML = '<thead><tr><th>序</th><th>局</th><th>结果</th><th>分数</th><th>操作</th></tr></thead>'
+      const tbody = el('tbody')
+      rep.history.forEach((h) => {
+        const tr = el('tr')
+        const ops = el('td')
+        const editBtn = el('button', '', '改')
+        editBtn.addEventListener('click', () => openEdit(h.order, 'edit'))
+        const rewindBtn = el('button', '', '回退')
+        rewindBtn.style.marginLeft = '6px'
+        rewindBtn.addEventListener('click', () => openEdit(h.order, 'rewind'))
+        ops.append(editBtn, rewindBtn)
+        tr.append(
+          el('td', '', String(h.order)),
+          el('td', '', roundLabel(h.round)),
+          el('td', '', resultText(h.result)),
+          el('td', '', h.scores.map((s) => String(s)).join(' / ')),
+          ops,
+        )
+        tbody.appendChild(tr)
+      })
+      table.appendChild(tbody)
+      list.appendChild(table)
+      panel.appendChild(list)
+      return panel
+    }
+
+    function openEdit(order: number, mode: 'edit' | 'rewind') {
+      const stored = rounds.find((round) => round.order === order)
+      if (!stored || !stored.win_type) return
+      const rep = replayGame(rounds)
+      const idx = rep.history.findIndex((item) => item.order === order)
+      const prev = idx > 0 ? rep.history[idx - 1] : null
+      editingOrder = order
+      editMode = mode
+      editState = {
+        round: idx >= 0 ? rep.history[idx].round : { wind: '东', number: 1, honba: 0 },
+        pool: prev ? prev.pool : 0,
+        scores: prev ? [...prev.scores] : [25000, 25000, 25000, 25000],
+      }
+      currentDora = [...(liveOnly.doraByOrder[String(order)] ?? [])]
+      currentWaits = (liveOnly.waitsByOrder[String(order)] ?? [[], [], [], []]).map((tiles) => [...tiles])
+      scoreOverride = liveOnly.scoreOverridesByOrder[String(order)] ? [...liveOnly.scoreOverridesByOrder[String(order)]] : null
+      form.winType = stored.win_type
+      form.riichi = [...(stored.riichi ?? [false, false, false, false])]
+      form.winner = null
+      form.loser = null
+      form.ronPoints = null
+      form.tsumoSplit = null
+      form.tenpai = [false, false, false, false]
+      if (stored.win_type === 'ron') {
+        form.winner = seatIndexOfSafe(stored.ron_winner)
+        form.loser = seatIndexOfSafe(stored.ron_loser)
+        form.ronPoints = stored.ron_points
+      } else if (stored.win_type === 'tsumo') {
+        form.winner = seatIndexOfSafe(stored.tsumo_winner)
+        form.tsumoSplit = stored.tsumo_points ? [...stored.tsumo_points] : null
+      } else {
+        form.tenpai = stored.tenpai ? [...stored.tenpai] : [false, false, false, false]
+      }
+      form.selKey = null
+      render()
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+
+    function seatIndexOfSafe(seat: string | null): number | null {
+      if (seat == null) return null
+      const idx = [0, 1, 2, 3].map(seatLabel).indexOf(seat)
+      return idx >= 0 ? idx : null
+    }
+
+    function resultText(result: RoundResult): string {
+      if (result.winType === 'ron') return `${seatLabel(result.winner!)}荣和${seatLabel(result.loser!)}`
+      if (result.winType === 'tsumo') return `${seatLabel(result.winner!)}自摸`
+      return `流局(${(result.tenpai ?? []).filter(Boolean).length}听)`
+    }
+
+    function renderTilePreview(root: HTMLElement, codes: string[]) {
+      root.innerHTML = ''
+      for (const code of codes) {
+        const img = document.createElement('img')
+        img.src = tileImageSrc(code)
+        img.alt = tileLabel(code)
+        root.appendChild(img)
+      }
+    }
+
+    function exportJson() {
+      const payload = {
+        version: 1,
+        gameId,
+        exportedAt: new Date().toISOString(),
+        rounds,
+        liveOnly,
+      }
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `pkuml-live-${gameId}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+    }
+
+    load()
+  </script>
+</BaseLayout>

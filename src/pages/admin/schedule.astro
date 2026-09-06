@@ -215,6 +215,11 @@ import StageTabs from '../../components/StageTabs.astro'
           rl.textContent = '逐局录入'
           rl.style.marginLeft = '8px'
           ops.appendChild(rl)
+          const liveLink = document.createElement('a')
+          liveLink.href = base + 'admin/live-control/?id=' + encodeURIComponent(g.id)
+          liveLink.textContent = '直播控制台'
+          liveLink.style.marginLeft = '8px'
+          ops.appendChild(liveLink)
         } else if (canOperate) {
           const link = document.createElement('a')
           link.href = base + 'match/?id=' + encodeURIComponent(g.id)
