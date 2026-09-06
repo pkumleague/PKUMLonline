@@ -70,6 +70,8 @@ const base = import.meta.env.BASE_URL
       let topInitialized = false
       let displayedTopKey = ''
       const tileCodeCache = new Map()
+      const TOP_LEFT_BG_FULL_WIDTH = 506
+      const DORA_BG_STEP = 48
 
       function readState() {
         if (remoteState) return remoteState
@@ -191,6 +193,7 @@ const base = import.meta.env.BASE_URL
 
       function clearDoraForNextRound() {
         if (!doraTiles?.classList.contains('has-tiles') || doraTiles.classList.contains('dora-clearing')) return
+        updateTopLeftBackground([])
         doraTiles.classList.add('dora-clearing')
         window.setTimeout(() => {
           tileCodeCache.set('dora', [])
@@ -207,6 +210,7 @@ const base = import.meta.env.BASE_URL
         poolLabel.textContent = String(current.pool)
         displayedTopKey = nextRoundKey
         if (clearEmptyDora && doraCodes.length === 0) {
+          updateTopLeftBackground([])
           tileCodeCache.set('dora', [])
           doraTiles.classList.remove('has-tiles', 'tiles-exiting')
           doraTiles.innerHTML = ''
@@ -390,6 +394,7 @@ const base = import.meta.env.BASE_URL
       function renderTiles(root, codes, cacheKey = '') {
         if (!root) return
         const visibleCodes = (codes ?? []).filter(Boolean)
+        if (cacheKey === 'dora') updateTopLeftBackground(visibleCodes)
         const previousCodes = cacheKey ? (tileCodeCache.get(cacheKey) ?? []) : []
         const previousText = previousCodes.join(',')
         const nextText = visibleCodes.join(',')
@@ -418,6 +423,12 @@ const base = import.meta.env.BASE_URL
           root.appendChild(img)
         }
         root.classList.toggle('has-tiles', visibleCodes.length > 0)
+      }
+
+      function updateTopLeftBackground(doraCodes) {
+        const count = Math.max(1, Math.min(4, doraCodes?.length ?? 0))
+        const width = TOP_LEFT_BG_FULL_WIDTH - (4 - count) * DORA_BG_STEP
+        overlay?.style.setProperty('--top-left-bg-width', `${width}px`)
       }
 
       function buildTileImg(code) {
@@ -482,11 +493,12 @@ const base = import.meta.env.BASE_URL
         top: 30px;
         left: 40px;
         z-index: 0;
-        width: 506px;
+        width: var(--top-left-bg-width, 506px);
         height: 88px;
         content: "";
         background: rgb(0 0 0 / 50%);
         border-radius: 16px;
+        transition: width 500ms ease;
       }
 
       .event-bug {
@@ -622,7 +634,7 @@ const base = import.meta.env.BASE_URL
       .dora-bug {
         position: absolute;
         top: 42px;
-        left: 354px;
+        left: 339px;
         z-index: 1;
         display: flex;
         height: 64px;
