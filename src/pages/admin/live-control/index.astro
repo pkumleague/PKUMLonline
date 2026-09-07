@@ -34,6 +34,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       background: var(--accent);
       color: #fff;
     }
+    .live-actions button.danger { border-color: #b91c1c; color: #b91c1c; }
     .seat-pick { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; width: 100%; }
     .seat-pick button { min-width: 0; text-align: left; }
     .seat-name { display: block; font-weight: 800; }
@@ -175,7 +176,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       return `${liveStorageKey(gameId!)}:draft`
     }
 
-    function buildLiveState() {
+    function buildLiveState(summary?: { id: string }) {
       return {
         version: 1,
         gameId,
@@ -186,6 +187,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
         currentRiichi: [...form.riichi],
         scoreOverride: null,
         liveOnly,
+        ...(summary ? { summary } : {}),
         updatedAt: new Date().toISOString(),
       }
     }
@@ -195,9 +197,9 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       localStorage.setItem(draftStorageKey(), JSON.stringify(buildLiveState()))
     }
 
-    function publish() {
+    function publish(summary?: { id: string }) {
       if (!gameId) return
-      const state = buildLiveState()
+      const state = buildLiveState(summary)
       localStorage.setItem(draftStorageKey(), JSON.stringify(state))
       localStorage.setItem(liveStorageKey(gameId), JSON.stringify(state))
       queueRemotePublish(state)
@@ -254,6 +256,8 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
         strip.appendChild(card)
       })
       top.appendChild(strip)
+      const finalPoolNote = finalPoolMessage(rep)
+      if (finalPoolNote) top.appendChild(el('p', 'import-hint', finalPoolNote))
       const linkRow = el('p', 'import-hint overlay-link', `直播姬浏览器源：${overlayUrl}`)
       top.appendChild(linkRow)
       root.appendChild(top)
@@ -505,7 +509,17 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       })
       const exportBtn = el('button', '', '导出 JSON')
       exportBtn.addEventListener('click', exportJson)
-      actions.append(nextBtn, publishBtn, exportBtn)
+      const clearBtn = el('button', 'danger', '清除全部直播录入')
+      clearBtn.addEventListener('click', clearLiveRecords)
+      actions.append(nextBtn, publishBtn, exportBtn, clearBtn)
+      if (isHanchanComplete(replayGame(rounds))) {
+        const summaryBtn = el('button', 'primary', '放送总结')
+        summaryBtn.addEventListener('click', () => {
+          publish({ id: crypto.randomUUID() })
+          showErr('已放送赛后总结到直播画面')
+        })
+        actions.appendChild(summaryBtn)
+      }
       wrap.appendChild(actions)
       return wrap
     }
@@ -699,7 +713,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       const next = nextRound(st.round, result)
       publish()
       render()
-      if (!next) showErr('南四非连庄结果已录完，可以导出 JSON 并导入官网。')
+      if (!next) showErr(finalPoolMessage(replayGame(rounds)) || '南四非连庄结果已录完，可以导出 JSON 并导入官网。')
     }
 
     function resetForm() {
@@ -711,6 +725,22 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       form.tsumoSplit = null
       form.tenpai = [false, false, false, false]
       form.selKey = null
+    }
+
+    function clearLiveRecords() {
+      if (!window.confirm('确认清除本半庄的全部直播录入吗？\n\n这会清空已录小局、宝牌、听牌和草稿，并同步清空直播源；已导出的 JSON 不受影响。')) return
+      rounds = []
+      currentDora = []
+      currentWaits = [[], [], [], []]
+      liveOnly = emptyLiveOnly()
+      editingOrder = null
+      editMode = null
+      editState = null
+      resetDraft = null
+      resetForm()
+      publish()
+      render()
+      showErr('已清除全部直播录入记录，并同步到直播画面')
     }
 
     function renderRoundPanel(rep: ReturnType<typeof replayGame>): HTMLElement {
@@ -735,10 +765,14 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
         const tr = el('tr')
         const ops = el('td')
         const editBtn = el('button', '', '改')
-        editBtn.addEventListener('click', () => openEdit(h.order, 'edit'))
+        editBtn.addEventListener('click', () => {
+          if (window.confirm(`确认修改第 ${h.order} 局吗？`)) openEdit(h.order, 'edit')
+        })
         const rewindBtn = el('button', '', '回退')
         rewindBtn.style.marginLeft = '6px'
-        rewindBtn.addEventListener('click', () => openEdit(h.order, 'rewind'))
+        rewindBtn.addEventListener('click', () => {
+          if (window.confirm(`确认回退到第 ${h.order} 局并重录吗？\n\n之后的小局会在重新保存时被移除。`)) openEdit(h.order, 'rewind')
+        })
         ops.append(editBtn, rewindBtn)
         tr.append(
           el('td', '', String(h.order)),
@@ -812,6 +846,21 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       if (result.winType === 'ron') return `${seatLabel(result.winner!)}荣和${seatLabel(result.loser!)}`
       if (result.winType === 'tsumo') return `${seatLabel(result.winner!)}自摸`
       return `流局(${(result.tenpai ?? []).filter(Boolean).length}听)`
+    }
+
+    function isHanchanComplete(rep: ReturnType<typeof replayGame>): boolean {
+      const latest = rep.history[rep.history.length - 1]
+      return Boolean(latest && nextRound(latest.round, latest.result) == null)
+    }
+
+    function finalPoolMessage(rep: ReturnType<typeof replayGame>): string {
+      const settlement = rep.finalPool
+      if (!settlement) return ''
+      if (settlement.requiresManual) {
+        return `终局剩余供托 ${settlement.amount} 点：三家并列第一，未自动分配。请在逐局录入的赛果页手动处理最终分数。`
+      }
+      const seats = settlement.recipients.map((i) => game.seats?.[i]?.player ?? game.seats?.[i]?.seat ?? seatLabel(i)).join('、')
+      return `终局剩余供托 ${settlement.amount} 点已分配给第一名：${seats}。`
     }
 
     function renderTilePreview(root: HTMLElement, codes: string[]) {

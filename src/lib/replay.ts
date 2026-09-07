@@ -69,6 +69,15 @@ export interface ReplayState {
 export interface ReplayResult {
   current: ReplayState
   history: RoundHistory[]
+  /** 半庄终局仍有供托时的最终归属；三家并列第一须由录入人手动处理。 */
+  finalPool?: FinalPoolSettlement
+}
+
+export interface FinalPoolSettlement {
+  amount: number
+  recipients: number[]
+  distribution: number[]
+  requiresManual: boolean
 }
 
 function buildRoundResult(r: StoredRound, state: RoundState): RoundResult {
@@ -112,6 +121,7 @@ export function replayGame(rounds: StoredRound[], startScore = 25000): ReplayRes
   const history: RoundHistory[] = []
   let settled = 0
   let draft: StoredRound | undefined
+  let ended = false
 
   for (const r of sorted) {
     if (r.reset) {
@@ -142,13 +152,39 @@ export function replayGame(rounds: StoredRound[], startScore = 25000): ReplayRes
     })
     settled++
     const next = nextRound(state, result)
-    if (!next) break // 半庄结束（南四推进）
+    if (!next) {
+      ended = true
+      break // 半庄结束（南四推进）
+    }
     state = next
+  }
+
+  let finalPool: FinalPoolSettlement | undefined
+  if (ended && pool > 0) {
+    const amount = pool * 1000
+    const topScore = Math.max(...scores)
+    const recipients = scores.map((score, i) => score === topScore ? i : -1).filter((i) => i >= 0)
+    const requiresManual = recipients.length === 3
+    const distribution = [0, 0, 0, 0]
+    if (!requiresManual) {
+      const share = amount / recipients.length
+      recipients.forEach((i) => { distribution[i] = share })
+      scores = scores.map((score, i) => score + distribution[i])
+      pool = 0
+      const latest = history[history.length - 1]
+      if (latest) {
+        latest.scores = [...scores]
+        latest.pool = 0
+        latest.deltas = latest.deltas.map((delta, i) => delta + distribution[i])
+      }
+    }
+    finalPool = { amount, recipients, distribution, requiresManual }
   }
 
   return {
     current: { round: state, scores, pool, settled, draft },
     history,
+    finalPool,
   }
 }
 

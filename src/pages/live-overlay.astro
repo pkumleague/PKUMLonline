@@ -37,6 +37,12 @@ const base = import.meta.env.BASE_URL
       </section>
 
       <section id="score-board" class="score-board"></section>
+      <section id="summary-scene" class="summary-scene" aria-hidden="true">
+        <header id="summary-heading" class="summary-heading"></header>
+        <div id="summary-chart" class="summary-chart"></div>
+        <aside id="summary-cards" class="summary-cards"></aside>
+        <div id="summary-table" class="summary-table"></div>
+      </section>
     </div>
 
     <script>
@@ -58,6 +64,11 @@ const base = import.meta.env.BASE_URL
       const poolLabel = document.getElementById('pool-label')
       const doraTiles = document.getElementById('dora-tiles')
       const board = document.getElementById('score-board')
+      const summaryScene = document.getElementById('summary-scene')
+      const summaryHeading = document.getElementById('summary-heading')
+      const summaryChart = document.getElementById('summary-chart')
+      const summaryCards = document.getElementById('summary-cards')
+      const summaryTable = document.getElementById('summary-table')
       const scoreBug = document.querySelector('.score-bug')
       const doraBug = document.querySelector('.dora-bug')
 
@@ -69,6 +80,8 @@ const base = import.meta.env.BASE_URL
       let topTransitionTimer = 0
       let topInitialized = false
       let displayedTopKey = ''
+      let displayedSummaryId = ''
+      let summaryTimers = []
       const tileCodeCache = new Map()
       const TOP_LEFT_BG_FULL_WIDTH = 506
       const DORA_BG_STEP = 48
@@ -106,6 +119,7 @@ const base = import.meta.env.BASE_URL
         overlay?.classList.remove('is-empty')
 
         const rep = replayGame(state.rounds ?? [])
+        maybePlaySummary(state, rep)
         const current = rep.current
         const scores = Array.isArray(state.scoreOverride) ? state.scoreOverride : current.scores
         const seats = state.game?.seats ?? []
@@ -189,6 +203,99 @@ const base = import.meta.env.BASE_URL
           wipeTopInfo(game, current, doraCodes, nextRoundKey)
           return
         }
+      }
+
+      function maybePlaySummary(state, rep) {
+        const id = state.summary?.id
+        if (!id || id === displayedSummaryId || rep.history.length === 0) return
+        displayedSummaryId = id
+        playSummary(state, rep)
+      }
+
+      function playSummary(state, rep) {
+        if (!summaryScene || !summaryHeading || !summaryChart || !summaryCards || !summaryTable) return
+        summaryTimers.forEach((timer) => clearTimeout(timer))
+        summaryTimers = []
+        const seats = state.game?.seats ?? []
+        const scores = rep.current.scores.map(Number)
+        const ranks = competitionRanks(scores)
+        const gameRound = String(state.game?.round ?? '').match(/\d+/)?.[0] ?? ''
+        const drawCount = rep.history.filter((item) => item.result.winType === 'draw').length
+        summaryHeading.innerHTML = `<strong>${escapeHtml(state.game?.stage ?? '常规赛')}${gameRound ? ` · 第${gameRound}半庄` : ''}</strong><span>总局数 / ${rep.history.length} 局（流局数 / ${drawCount} 局）</span>`
+        summaryChart.innerHTML = buildSummaryChart(rep, seats)
+        summaryCards.innerHTML = seats
+          .map((seat, i) => ({ seat, i, score: scores[i], rank: ranks[i] }))
+          .sort((a, b) => a.rank - b.rank || b.score - a.score)
+          .map(({ seat, i }) => {
+            const teamColor = teams.get(seat.team ?? '') ?? '#242a33'
+            return `<article class="summary-card" style="--team-color:${escapeHtml(teamColor)};--team-rgb:${hexToRgb(teamColor)}"><strong>${escapeHtml(seat.player ?? seat.name ?? seat.team ?? `选手${i + 1}`)}</strong><small>${escapeHtml(seat.team ?? '')}</small></article>`
+          })
+          .join('')
+        summaryTable.innerHTML = buildSummaryTable(rep, seats, scores, ranks)
+        overlay?.classList.add('summary-active')
+        summaryScene.className = 'summary-scene summary-covering'
+        void summaryScene.offsetWidth
+        summaryTimers.push(window.setTimeout(() => summaryScene.classList.add('summary-axes'), 1000))
+        summaryTimers.push(window.setTimeout(() => summaryScene.classList.add('summary-lines'), 2000))
+        summaryTimers.push(window.setTimeout(() => summaryScene.classList.add('summary-cards-in'), 4000))
+        summaryTimers.push(window.setTimeout(() => summaryScene.classList.add('summary-table-stage'), 15000))
+        summaryTimers.push(window.setTimeout(() => summaryScene.classList.add('summary-table-in'), 16000))
+      }
+
+      function buildSummaryChart(rep, seats) {
+        const values = rep.history.flatMap((item) => item.scores.map(Number)).concat([25000])
+        const low = Math.floor((Math.min(...values) - 1000) / 5000) * 5000
+        const high = Math.ceil((Math.max(...values) + 1000) / 5000) * 5000
+        const span = Math.max(1, high - low)
+        const width = 960
+        const height = 560
+        const left = 76
+        const right = 26
+        const top = 24
+        const bottom = 54
+        const series = seats.map((seat, i) => {
+          const points = [25000, ...rep.history.map((item) => item.scores[i])]
+            .map((score, index) => `${left + index * ((width - left - right) / Math.max(1, rep.history.length))},${top + (high - Number(score)) / span * (height - top - bottom)}`)
+            .join(' ')
+          return `<polyline class="summary-line" style="stroke:${escapeHtml(teams.get(seat.team ?? '') ?? '#fff')}" points="${points}" />`
+        }).join('')
+        const verticals = Array.from({ length: rep.history.length + 1 }, (_, i) => {
+          const x = left + i * ((width - left - right) / Math.max(1, rep.history.length))
+          const label = i === 0 ? '起始' : escapeHtml(roundParts(rep.history[i - 1].round).join(''))
+          return `<line x1="${x}" y1="${top}" x2="${x}" y2="${height - bottom}" /><text x="${x}" y="${height - 16}">${label}</text>`
+        }).join('')
+        return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="四位选手分数走势"><g class="summary-grid"><line x1="${left}" y1="${top}" x2="${left}" y2="${height - bottom}" /><line x1="${left}" y1="${height - bottom}" x2="${width - right}" y2="${height - bottom}" />${verticals}<text x="8" y="${top + 8}">${formatScore(high)}</text><text x="8" y="${height - bottom + 6}">${formatScore(low)}</text></g><g>${series}</g></svg>`
+      }
+
+      function buildSummaryTable(rep, seats, scores, ranks) {
+        const count = (fn) => seats.map((_, i) => fn(i))
+        const riichi = count((i) => rep.history.filter((item) => item.result.riichi?.[i]).length)
+        const ron = count((i) => rep.history.filter((item) => item.result.winType === 'ron' && item.result.winner === i).length)
+        const tsumo = count((i) => rep.history.filter((item) => item.result.winType === 'tsumo' && item.result.winner === i).length)
+        const dealIn = count((i) => rep.history.filter((item) => item.result.winType === 'ron' && item.result.loser === i).length)
+        const rows = seats.map((seat, i) => ({
+          i,
+          rank: ranks[i],
+          score: scores[i],
+          riichi: riichi[i],
+          wins: ron[i] + tsumo[i],
+          dealIn: dealIn[i],
+        })).sort((a, b) => a.rank - b.rank || b.score - a.score)
+        const amount = (value, unit) => `<span class="summary-number">${value}</span><span class="summary-unit">${unit}</span>`
+        return `<table><thead><tr><th>顺位</th><th>最终持有点</th><th>立直次数</th><th>和牌次数</th><th>放铳次数</th></tr></thead><tbody>${rows.map((row) => `<tr><td>${amount(row.rank, '位')}</td><td><span class="summary-number">${formatScore(row.score)}</span></td><td>${amount(row.riichi, '回')}</td><td>${amount(row.wins, '回')}</td><td>${amount(row.dealIn, '回')}</td></tr>`).join('')}</tbody></table>`
+      }
+
+      function competitionRanks(scores) {
+        const order = scores.map((score, i) => ({ score, i })).sort((a, b) => b.score - a.score)
+        const ranks = new Array(scores.length).fill(0)
+        let start = 0
+        while (start < order.length) {
+          let end = start
+          while (end + 1 < order.length && order[end + 1].score === order[start].score) end++
+          for (let i = start; i <= end; i++) ranks[order[i].i] = start + 1
+          start = end + 1
+        }
+        return ranks
       }
 
       function clearDoraForNextRound() {
@@ -1017,6 +1124,130 @@ const base = import.meta.env.BASE_URL
         0% { --wipe: 160%; }
         100% { --wipe: -60%; }
       }
+
+      .summary-scene {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 390px;
+        grid-template-rows: 94px minmax(0, 1fr);
+        gap: 28px 36px;
+        padding: 54px 72px 58px;
+        box-sizing: border-box;
+        opacity: 0;
+        overflow: hidden;
+        color: #fff;
+        background: rgb(0 0 0 / 80%);
+        transition: opacity 1000ms ease;
+      }
+
+      .summary-covering { opacity: 1; }
+
+      .summary-heading {
+        grid-column: 1 / -1;
+        display: flex;
+        gap: 42px;
+        align-items: center;
+        padding: 0 34px;
+        background: linear-gradient(100deg, #05662e, #003819 70%, #012713);
+        box-shadow: 0 10px 32px rgb(0 0 0 / 38%);
+        font-size: 29px;
+        font-weight: 850;
+        letter-spacing: .04em;
+        opacity: 0;
+        transform: translateY(-16px);
+        transition: opacity 500ms ease 500ms, transform 500ms ease 500ms;
+      }
+
+      .summary-heading strong { font-size: 38px; }
+
+      .summary-chart {
+        min-width: 0;
+        align-self: stretch;
+        opacity: 0;
+        transform: translateY(25px) scale(.98);
+        transition: opacity 500ms ease, transform 500ms ease;
+      }
+
+      .summary-chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
+      .summary-grid { opacity: 0; transition: opacity 1000ms ease; }
+      .summary-grid line { stroke: rgb(255 255 255 / 46%); stroke-width: 1.5; }
+      .summary-grid text { fill: rgb(255 255 255 / 86%); font-size: 20px; font-weight: 700; text-anchor: middle; }
+      .summary-grid text:first-of-type, .summary-grid text:nth-of-type(2) { text-anchor: start; }
+      .summary-line { fill: none; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 2000; stroke-dashoffset: 2000; filter: drop-shadow(0 0 5px rgb(255 255 255 / 26%)); }
+
+      .summary-cards {
+        display: grid;
+        grid-template-rows: repeat(4, 1fr);
+        gap: 0;
+        min-height: 0;
+        padding-top: 60px;
+        box-sizing: border-box;
+      }
+
+      .summary-card {
+        position: relative;
+        display: grid;
+        gap: 6px;
+        padding: 14px 20px;
+        overflow: hidden;
+        background: var(--team-color);
+        background: linear-gradient(105deg, rgb(var(--team-rgb) / 96%), rgb(var(--team-rgb) / 64%));
+        border-left: 8px solid var(--team-color);
+        box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+        opacity: 0;
+        transform: translateX(38px);
+        transition: opacity 400ms ease, transform 400ms ease;
+      }
+
+      .summary-card::after { position: absolute; inset: 0; content: ""; background: linear-gradient(130deg, transparent 55%, rgb(255 255 255 / 12%)); pointer-events: none; }
+      .summary-card strong { position: absolute; top: 50%; left: 20px; overflow: hidden; max-width: calc(100% - 40px); font-size: 60px; line-height: 1; text-overflow: ellipsis; transform: translateY(-50%); white-space: nowrap; }
+      .summary-card small { position: absolute; top: calc(50% + 36px); left: 20px; font-size: 32px; font-weight: 700; line-height: 1; opacity: .9; }
+
+      .summary-table {
+        position: absolute;
+        top: 176px;
+        right: 72px;
+        bottom: 58px;
+        left: 510px;
+        display: grid;
+        place-items: center;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 1000ms ease;
+      }
+
+      .summary-table table { width: 100%; height: 100%; table-layout: fixed; border-collapse: collapse; background: rgb(0 0 0 / 40%); box-shadow: 0 14px 40px rgb(0 0 0 / 35%); font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; font-size: 54px; font-synthesis: none; }
+      .summary-table th, .summary-table td { padding: 10px; border-bottom: 1px solid rgb(255 255 255 / 26%); text-align: center; white-space: nowrap; }
+      .summary-table th { font-size: 34px; font-weight: 700; }
+      .summary-table thead { background: rgb(0 102 46 / 88%); }
+      .summary-table thead { height: 60px; }
+      .summary-table tbody { height: calc(100% - 60px); }
+      .summary-table tbody tr { height: 25%; }
+      .summary-table thead th { letter-spacing: -.08em; }
+      .summary-number { font-variant-numeric: tabular-nums; font-weight: 800; }
+      .summary-unit { margin-left: 3px; font-size: 34px; font-weight: 400; }
+
+      .summary-axes .summary-heading { opacity: 1; transform: none; }
+      .summary-axes .summary-chart { opacity: 1; transform: translateY(25px); }
+      .summary-axes .summary-grid { opacity: 1; }
+      .summary-lines .summary-line { animation: summary-line-reveal 2000ms ease-in-out forwards; }
+      .summary-cards-in .summary-card { opacity: 1; transform: none; }
+      .summary-cards-in .summary-card:nth-child(2) { transition-delay: 180ms; }
+      .summary-cards-in .summary-card:nth-child(3) { transition-delay: 360ms; }
+      .summary-cards-in .summary-card:nth-child(4) { transition-delay: 540ms; }
+      .summary-table-stage .summary-chart { opacity: 0; transform: translate(-30px, 25px); }
+      .summary-table-stage .summary-cards { transition: transform 1000ms ease; transform: translateX(calc(-100vw + 570px)); }
+      .summary-table-in .summary-table { opacity: 1; }
+
+      @keyframes summary-line-reveal { to { stroke-dashoffset: 0; } }
+
+      .summary-active .event-bug,
+      .summary-active::before,
+      .summary-active .score-bug,
+      .summary-active .dora-bug,
+      .summary-active .score-board { opacity: 0; transition: opacity 350ms ease; }
 
       .is-empty .event-bug,
       .is-empty::before,

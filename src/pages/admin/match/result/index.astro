@@ -128,6 +128,14 @@ import AdminShell from '../../../../components/admin/AdminShell.astro'
       clearErr()
       root.innerHTML = ''
       const seats = game.seats ?? []
+      if (rep?.finalPool?.requiresManual) {
+        const note = el('p', 'sel-info', `终局剩余供托 ${rep.finalPool.amount} 点：三家并列第一，系统未自动分配。请在下方「最终分数（可改）」中手动处理后再提交。`)
+        note.style.color = '#b45309'
+        note.style.fontWeight = '700'
+        root.appendChild(note)
+      } else if (rep?.finalPool) {
+        root.appendChild(el('p', 'sel-info', `终局剩余供托 ${rep.finalPool.amount} 点已自动分配给并列第一名。`))
+      }
       scoreInputs = []
       ptInputs = []
       rankSelects = []

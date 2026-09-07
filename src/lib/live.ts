@@ -32,6 +32,8 @@ export interface LiveState {
   currentRiichi?: boolean[]
   scoreOverride: number[] | null
   liveOnly: LiveOnlyData
+  /** 一次性的赛后总结放送信号；不参与逐局 JSON 导出。 */
+  summary?: { id: string }
   updatedAt: string
 }
 

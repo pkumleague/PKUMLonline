@@ -205,6 +205,8 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       roundTitle.textContent = `${roundLabel(st.round)}　亲家：${seatLabelOf(dealerSeat(st.round))}　供托：${st.pool * 1000}点` +
         (editingOrder != null ? `　【修改第${editingOrder}局：${editMode === 'rewind' ? '回退重录（保存后删除后续局）' : '修改本局（保存后自动重算后续局）'}】` : '')
       root.appendChild(roundTitle)
+      const finalPoolNote = finalPoolMessage()
+      if (finalPoolNote) root.appendChild(el('p', 'sel-info', finalPoolNote))
 
       if (editingOrder == null && rep.current.draft && !draftLoaded) {
         loadDraftToForm(rep.current.draft)
@@ -586,10 +588,10 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       editState = null
       // 南四锁定：下一局为 null 时不允许继续
       if (nextRound(st.round, result) === null && savedOrder == null) {
-        showErr('南四局已结束（非连庄结果），请「查看结果」并提交。')
         resetForm()
         await refreshRounds()
         render()
+        showErr(finalPoolMessage() || '南四局已结束（非连庄结果），请「查看结果」并提交。')
         return
       }
       resetForm()
@@ -638,6 +640,16 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       form.tenpai = null
       form.selKey = null
       draftLoaded = false
+    }
+
+    function finalPoolMessage(): string {
+      const settlement = rep?.finalPool
+      if (!settlement) return ''
+      if (settlement.requiresManual) {
+        return `终局剩余供托 ${settlement.amount} 点：三家并列第一，未自动分配。请点击「查看结果」，在最终分数栏手动处理。`
+      }
+      const seats = settlement.recipients.map((i) => game.seats?.[i]?.player ?? game.seats?.[i]?.seat ?? seatLabelOf(i)).join('、')
+      return `终局剩余供托 ${settlement.amount} 点已自动分配给第一名：${seats}。`
     }
 
     async function fetchRounds(): Promise<StoredRound[]> {

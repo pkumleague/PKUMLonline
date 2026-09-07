@@ -160,6 +160,36 @@ describe('replayGame', () => {
     expect(current.round).toEqual({ wind: '南', number: 4, honba: 0 })
     expect(current.settled).toBe(8)
   })
+
+  it('终局剩余供托自动给唯一第一名', () => {
+    const { current, finalPool, history } = replayGame([
+      { ...round({ order: 1 }), reset: { round: { wind: '南', number: 4, honba: 0 }, scores: [30000, 26000, 24000, 18000], pool: 2 } },
+      round({ order: 2, win_type: 'draw', tenpai: [false, false, false, false] }),
+    ])
+    expect(current.scores).toEqual([32000, 26000, 24000, 18000])
+    expect(current.pool).toBe(0)
+    expect(history[0].scores).toEqual(current.scores)
+    expect(finalPool).toMatchObject({ amount: 2000, recipients: [0], distribution: [2000, 0, 0, 0], requiresManual: false })
+  })
+
+  it('终局剩余供托由两位并列第一平分', () => {
+    const { current, finalPool } = replayGame([
+      { ...round({ order: 1 }), reset: { round: { wind: '南', number: 4, honba: 0 }, scores: [30000, 30000, 22000, 18000], pool: 3 } },
+      round({ order: 2, win_type: 'draw', tenpai: [false, false, false, false] }),
+    ])
+    expect(current.scores).toEqual([31500, 31500, 22000, 18000])
+    expect(finalPool).toMatchObject({ amount: 3000, recipients: [0, 1], distribution: [1500, 1500, 0, 0], requiresManual: false })
+  })
+
+  it('终局三家并列第一时保留供托并要求手动处理', () => {
+    const { current, finalPool } = replayGame([
+      { ...round({ order: 1 }), reset: { round: { wind: '南', number: 4, honba: 0 }, scores: [30000, 30000, 30000, 10000], pool: 2 } },
+      round({ order: 2, win_type: 'draw', tenpai: [false, false, false, false] }),
+    ])
+    expect(current.scores).toEqual([30000, 30000, 30000, 10000])
+    expect(current.pool).toBe(2)
+    expect(finalPool).toMatchObject({ amount: 2000, recipients: [0, 1, 2], distribution: [0, 0, 0, 0], requiresManual: true })
+  })
 })
 
 describe('roundLabel / seatLabel', () => {
