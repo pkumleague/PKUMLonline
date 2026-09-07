@@ -49,6 +49,7 @@ const base = import.meta.env.BASE_URL
       import teamsRaw from '../../data/teams.json'
       import { dealerSeat } from '../lib/scoring'
       import { replayGame } from '../lib/replay'
+      import { rawScoreOf, rankPointsForScores } from '../lib/aggregate'
       import { liveStorageKey, tileImageSrc, tileLabel } from '../lib/live'
 
       const params = new URLSearchParams(location.search)
@@ -80,6 +81,7 @@ const base = import.meta.env.BASE_URL
       let topTransitionTimer = 0
       let topInitialized = false
       let displayedTopKey = ''
+      let displayedDealer = null
       let displayedSummaryId = ''
       let summaryTimers = []
       const tileCodeCache = new Map()
@@ -136,6 +138,9 @@ const base = import.meta.env.BASE_URL
           poolEntries: [[], [], [], []],
         }
         const isNextRound = topChanged
+        const renderDealer = scoreChanged && settledAdvanced && isNextRound && displayedDealer != null
+          ? displayedDealer
+          : dealer
 
         if (!isNextRound) updateTopInfo(game, current, state.currentDora ?? [])
 
@@ -151,7 +156,7 @@ const base = import.meta.env.BASE_URL
           const player = seat.player ?? seat.name ?? ''
           const card = document.createElement('article')
           card.className = 'player-lower'
-          if (i === dealer) card.classList.add('dealer')
+          if (i === renderDealer) card.classList.add('dealer')
           const teamColor = teams.get(team) ?? '#242a33'
           card.style.setProperty('--team-color', teamColor)
           card.style.setProperty('--team-rgb', hexToRgb(teamColor))
@@ -173,6 +178,7 @@ const base = import.meta.env.BASE_URL
           renderTiles(card.querySelector('.waits'), state.currentWaits?.[i] ?? [], `wait-${i}`)
           board.appendChild(card)
         }
+        displayedDealer = renderDealer
         previousSettled = current.settled
         if (scoreChanged) {
           playScoreChange(scores, scoreParts.nameDeltas, scoreParts.poolEntries)
@@ -184,6 +190,7 @@ const base = import.meta.env.BASE_URL
           window.clearTimeout(topTransitionTimer)
           topTransitionTimer = window.setTimeout(() => {
             updateTopInfo(game, current, state.currentDora ?? [], true)
+            setDisplayedDealer(dealer)
           }, 6000)
         }
       }
@@ -203,6 +210,13 @@ const base = import.meta.env.BASE_URL
           wipeTopInfo(game, current, doraCodes, nextRoundKey)
           return
         }
+      }
+
+      function setDisplayedDealer(dealer) {
+        displayedDealer = dealer
+        ;[...board.querySelectorAll('.player-lower')].forEach((card, i) => {
+          card.classList.toggle('dealer', i === dealer)
+        })
       }
 
       function maybePlaySummary(state, rep) {
@@ -244,8 +258,8 @@ const base = import.meta.env.BASE_URL
 
       function buildSummaryChart(rep, seats) {
         const values = rep.history.flatMap((item) => item.scores.map(Number)).concat([25000])
-        const low = Math.floor((Math.min(...values) - 1000) / 5000) * 5000
-        const high = Math.ceil((Math.max(...values) + 1000) / 5000) * 5000
+        const low = Math.min(...values)
+        const high = Math.max(...values)
         const span = Math.max(1, high - low)
         const width = 960
         const height = 560
@@ -261,10 +275,16 @@ const base = import.meta.env.BASE_URL
         }).join('')
         const verticals = Array.from({ length: rep.history.length + 1 }, (_, i) => {
           const x = left + i * ((width - left - right) / Math.max(1, rep.history.length))
-          const label = i === 0 ? '起始' : escapeHtml(roundParts(rep.history[i - 1].round).join(''))
-          return `<line x1="${x}" y1="${top}" x2="${x}" y2="${height - bottom}" /><text x="${x}" y="${height - 16}">${label}</text>`
+          const currentRound = i > 0 ? rep.history[i - 1].round : null
+          const previousRound = i > 1 ? rep.history[i - 2].round : null
+          const label = !currentRound
+            ? ''
+            : currentRound.wind !== previousRound?.wind
+              ? `${currentRound.wind}${currentRound.number}`
+              : String(currentRound.number)
+          return `<line x1="${x}" y1="${top}" x2="${x}" y2="${height - bottom}" /><text class="summary-x-label" x="${x}" y="${height - 16}">${label}</text>`
         }).join('')
-        return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="四位选手分数走势"><g class="summary-grid"><line x1="${left}" y1="${top}" x2="${left}" y2="${height - bottom}" /><line x1="${left}" y1="${height - bottom}" x2="${width - right}" y2="${height - bottom}" />${verticals}<text x="8" y="${top + 8}">${formatScore(high)}</text><text x="8" y="${height - bottom + 6}">${formatScore(low)}</text></g><g>${series}</g></svg>`
+        return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="四位选手分数走势"><g class="summary-grid"><line x1="${left}" y1="${top}" x2="${left}" y2="${height - bottom}" /><line x1="${left}" y1="${height - bottom}" x2="${width - right}" y2="${height - bottom}" />${verticals}<text class="summary-y-label" x="8" y="${top}">${formatScore(high)}</text><text class="summary-y-label" x="8" y="${height - bottom}">${formatScore(low)}</text></g><g>${series}</g></svg>`
       }
 
       function buildSummaryTable(rep, seats, scores, ranks) {
@@ -273,6 +293,8 @@ const base = import.meta.env.BASE_URL
         const ron = count((i) => rep.history.filter((item) => item.result.winType === 'ron' && item.result.winner === i).length)
         const tsumo = count((i) => rep.history.filter((item) => item.result.winType === 'tsumo' && item.result.winner === i).length)
         const dealIn = count((i) => rep.history.filter((item) => item.result.winType === 'ron' && item.result.loser === i).length)
+        const rankPoints = rankPointsForScores(scores)
+        const pts = scores.map((score, i) => Math.round((rawScoreOf(score) + rankPoints[i]) * 10) / 10)
         const rows = seats.map((seat, i) => ({
           i,
           rank: ranks[i],
@@ -282,7 +304,8 @@ const base = import.meta.env.BASE_URL
           dealIn: dealIn[i],
         })).sort((a, b) => a.rank - b.rank || b.score - a.score)
         const amount = (value, unit) => `<span class="summary-number">${value}</span><span class="summary-unit">${unit}</span>`
-        return `<table><thead><tr><th>顺位</th><th>最终持有点</th><th>立直次数</th><th>和牌次数</th><th>放铳次数</th></tr></thead><tbody>${rows.map((row) => `<tr><td>${amount(row.rank, '位')}</td><td><span class="summary-number">${formatScore(row.score)}</span></td><td>${amount(row.riichi, '回')}</td><td>${amount(row.wins, '回')}</td><td>${amount(row.dealIn, '回')}</td></tr>`).join('')}</tbody></table>`
+        const ptText = (value) => `${value > 0 ? '+' : ''}${value}`
+        return `<table><thead><tr><th>顺位</th><th>最终持有点</th><th>立直次数</th><th>和牌次数</th><th>放铳次数</th></tr></thead><tbody>${rows.map((row) => `<tr><td>${amount(row.rank, '位')}</td><td><span class="summary-number summary-score">${formatScore(row.score)}</span><small class="summary-pt">(${ptText(pts[row.i])})</small></td><td>${amount(row.riichi, '回')}</td><td>${amount(row.wins, '回')}</td><td>${amount(row.dealIn, '回')}</td></tr>`).join('')}</tbody></table>`
       }
 
       function competitionRanks(scores) {
@@ -585,7 +608,8 @@ const base = import.meta.env.BASE_URL
 
       body {
         color: #fff;
-        font-family: "Yu Gothic", "Hiragino Kaku Gothic ProN", "Microsoft YaHei", sans-serif;
+        font-family: "Microsoft YaHei", sans-serif;
+        font-synthesis: none;
       }
 
       .overlay {
@@ -629,14 +653,14 @@ const base = import.meta.env.BASE_URL
 
       .event-bug strong {
         font-size: 42px;
-        font-weight: 950;
+        font-weight: 700;
         line-height: .95;
       }
 
       .event-bug span {
         padding-top: 5px;
         font-size: 26px;
-        font-weight: 850;
+        font-weight: 700;
         border-top: 3px solid #fff;
       }
 
@@ -1153,14 +1177,14 @@ const base = import.meta.env.BASE_URL
         background: linear-gradient(100deg, #05662e, #003819 70%, #012713);
         box-shadow: 0 10px 32px rgb(0 0 0 / 38%);
         font-size: 29px;
-        font-weight: 850;
+        font-weight: 700;
         letter-spacing: .04em;
         opacity: 0;
         transform: translateY(-16px);
         transition: opacity 500ms ease 500ms, transform 500ms ease 500ms;
       }
 
-      .summary-heading strong { font-size: 38px; }
+      .summary-heading strong { font-size: 38px; font-weight: 700; }
 
       .summary-chart {
         min-width: 0;
@@ -1173,8 +1197,9 @@ const base = import.meta.env.BASE_URL
       .summary-chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
       .summary-grid { opacity: 0; transition: opacity 1000ms ease; }
       .summary-grid line { stroke: rgb(255 255 255 / 46%); stroke-width: 1.5; }
-      .summary-grid text { fill: rgb(255 255 255 / 86%); font-size: 20px; font-weight: 700; text-anchor: middle; }
-      .summary-grid text:first-of-type, .summary-grid text:nth-of-type(2) { text-anchor: start; }
+      .summary-grid text { fill: rgb(255 255 255 / 86%); font-size: 20px; font-weight: 700; }
+      .summary-x-label { text-anchor: middle; }
+      .summary-y-label { dominant-baseline: middle; text-anchor: start; }
       .summary-line { fill: none; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 2000; stroke-dashoffset: 2000; filter: drop-shadow(0 0 5px rgb(255 255 255 / 26%)); }
 
       .summary-cards {
@@ -1203,7 +1228,7 @@ const base = import.meta.env.BASE_URL
 
       .summary-card::after { position: absolute; inset: 0; content: ""; background: linear-gradient(130deg, transparent 55%, rgb(255 255 255 / 12%)); pointer-events: none; }
       .summary-card strong { position: absolute; top: 50%; left: 20px; overflow: hidden; max-width: calc(100% - 40px); font-size: 60px; line-height: 1; text-overflow: ellipsis; transform: translateY(-50%); white-space: nowrap; }
-      .summary-card small { position: absolute; top: calc(50% + 36px); left: 20px; font-size: 32px; font-weight: 700; line-height: 1; opacity: .9; }
+      .summary-card small { position: absolute; top: calc(50% + 46px); left: 20px; font-size: 32px; font-weight: 700; line-height: 1; opacity: .9; }
 
       .summary-table {
         position: absolute;
@@ -1228,6 +1253,8 @@ const base = import.meta.env.BASE_URL
       .summary-table thead th { letter-spacing: -.08em; }
       .summary-number { font-variant-numeric: tabular-nums; font-weight: 800; }
       .summary-unit { margin-left: 3px; font-size: 34px; font-weight: 400; }
+      .summary-score { display: block; }
+      .summary-pt { display: block; margin-top: 8px; font-size: 34px; font-weight: 400; line-height: 1; }
 
       .summary-axes .summary-heading { opacity: 1; transform: none; }
       .summary-axes .summary-chart { opacity: 1; transform: translateY(25px); }
