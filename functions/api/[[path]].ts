@@ -59,6 +59,38 @@ function unarrangedFromRow(row) {
   return { ...row, seats: parseJson(row.seats, []) }
 }
 
+function sameJson(a, b) {
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+}
+
+function validDraftGames(games) {
+  if (!Array.isArray(games)) return false
+  const ids = new Set()
+  return games.every((game) => {
+    if (!game || !game.id || !game.season || !game.stage || !game.date || !Array.isArray(game.seats) || game.seats.length !== 4) return false
+    if (ids.has(game.id)) return false
+    ids.add(game.id)
+    return true
+  })
+}
+
+function validDraftUnarranged(games) {
+  if (!Array.isArray(games)) return false
+  const keys = new Set()
+  return games.every((game) => {
+    if (!game || !game.id || !game.season || !game.stage || !Number.isInteger(Number(game.seq)) || Number(game.seq) < 1 || !Array.isArray(game.seats) || game.seats.length !== 4) return false
+    const key = `${game.season}__${game.stage}__${game.seq}`
+    if (keys.has(key)) return false
+    keys.add(key)
+    return true
+  })
+}
+
+function scheduleFieldsChanged(base, draft) {
+  return ['season', 'stage', 'date', 'time', 'round', 'live_status', 'seats']
+    .some((field) => !sameJson(base[field], draft[field]))
+}
+
 function newId() {
   return crypto.randomUUID()
 }
@@ -481,6 +513,124 @@ async function deleteUnarranged(env, request, id) {
   return json({ ok: true })
 }
 
+async function currentSchedule(env) {
+  const [games, unarranged] = await Promise.all([
+    allRows(env.DB.prepare('select * from games order by date asc')),
+    allRows(env.DB.prepare('select * from unarranged_games order by seq asc')),
+  ])
+  return {
+    games: games.map(gameFromRow),
+    unarranged: unarranged.map(unarrangedFromRow),
+  }
+}
+
+async function scheduleDraftState(env) {
+  const row = await env.DB.prepare('select * from schedule_draft_state where id = 1').first()
+  if (row) {
+    return {
+      hasChanges: true,
+      baseGames: parseJson(row.base_games, []),
+      games: parseJson(row.draft_games, []),
+      baseUnarranged: parseJson(row.base_unarranged, []),
+      unarranged: parseJson(row.draft_unarranged, []),
+      updatedAt: row.updated_at,
+    }
+  }
+  const current = await currentSchedule(env)
+  return { hasChanges: false, baseGames: current.games, games: current.games, baseUnarranged: current.unarranged, unarranged: current.unarranged, updatedAt: null }
+}
+
+async function getScheduleDraft(env, request) {
+  const { response } = await requireRole(env, request, ['admin'], '仅管理员可管理赛程草稿')
+  if (response) return response
+  const draft = await scheduleDraftState(env)
+  return json({ data: { hasChanges: draft.hasChanges, games: draft.games, unarranged: draft.unarranged, updatedAt: draft.updatedAt } })
+}
+
+async function saveScheduleDraft(env, request) {
+  const { response } = await requireRole(env, request, ['admin'], '仅管理员可管理赛程草稿')
+  if (response) return response
+  const body = await readBody(request)
+  const games = body.games
+  const unarranged = body.unarranged
+  if (!validDraftGames(games) || !validDraftUnarranged(unarranged)) return error('invalid schedule draft', 400)
+
+  const current = await scheduleDraftState(env)
+  await env.DB.prepare(
+    `insert into schedule_draft_state (id, base_games, draft_games, base_unarranged, draft_unarranged, updated_at)
+     values (1, ?1, ?2, ?3, ?4, datetime('now'))
+     on conflict(id) do update set draft_games = excluded.draft_games, draft_unarranged = excluded.draft_unarranged, updated_at = excluded.updated_at`,
+  )
+    .bind(toJson(current.baseGames), toJson(games), toJson(current.baseUnarranged), toJson(unarranged))
+    .run()
+  return json({ ok: true })
+}
+
+async function discardScheduleDraft(env, request) {
+  const { response } = await requireRole(env, request, ['admin'], '仅管理员可管理赛程草稿')
+  if (response) return response
+  await env.DB.prepare('delete from schedule_draft_state where id = 1').run()
+  return json({ ok: true })
+}
+
+async function publishScheduleDraft(env, request) {
+  const { response } = await requireRole(env, request, ['admin'], '仅管理员可管理赛程草稿')
+  if (response) return response
+  const draft = await scheduleDraftState(env)
+  if (!draft.hasChanges) return json({ ok: true })
+
+  const live = await currentSchedule(env)
+  const baseGames = new Map(draft.baseGames.map((game) => [game.id, game]))
+  const draftGames = new Map(draft.games.map((game) => [game.id, game]))
+  const liveGames = new Map(live.games.map((game) => [game.id, game]))
+  const statements = []
+
+  for (const [id, game] of draftGames) {
+    const base = baseGames.get(id)
+    const liveGame = liveGames.get(id)
+    if (!base && !liveGame) {
+      statements.push(
+        env.DB.prepare(
+          `insert into games (id, season, stage, date, time, round, status, live_status, seats)
+           values (?1, ?2, ?3, ?4, ?5, ?6, 'upcoming', ?7, ?8)`,
+        ).bind(id, game.season, game.stage, game.date, game.time ?? null, game.round ?? null, game.live_status ?? null, toJson(game.seats)),
+      )
+      continue
+    }
+    if (!base || !liveGame || !scheduleFieldsChanged(base, game)) continue
+    const seats = sameJson(base.seats, game.seats) ? liveGame.seats : game.seats
+    statements.push(
+      env.DB.prepare(
+        `update games set season = ?1, stage = ?2, date = ?3, time = ?4, round = ?5,
+         live_status = ?6, seats = ?7 where id = ?8`,
+      ).bind(game.season, game.stage, game.date, game.time ?? null, game.round ?? null, game.live_status ?? null, toJson(seats), id),
+    )
+  }
+
+  for (const [id, base] of baseGames) {
+    if (draftGames.has(id)) continue
+    const liveGame = liveGames.get(id)
+    if (!liveGame) continue
+    if (liveGame.status !== base.status) return error('有赛果已实时更新，请刷新赛程草稿后再发布', 409)
+    statements.push(
+      env.DB.prepare('delete from live_states where game_id = ?1').bind(id),
+      env.DB.prepare('delete from rounds where game_id = ?1').bind(id),
+      env.DB.prepare('delete from games where id = ?1').bind(id),
+    )
+  }
+
+  statements.push(env.DB.prepare('delete from unarranged_games'))
+  for (const game of draft.unarranged) {
+    statements.push(
+      env.DB.prepare('insert into unarranged_games (id, season, stage, seq, seats) values (?1, ?2, ?3, ?4, ?5)')
+        .bind(game.id, game.season, game.stage, Number(game.seq), toJson(game.seats)),
+    )
+  }
+  statements.push(env.DB.prepare('delete from schedule_draft_state where id = 1'))
+  await env.DB.batch(statements)
+  return json({ ok: true })
+}
+
 async function arrangeUnarranged(env, request, id) {
   const { response } = await requireRole(env, request, ['admin'], '仅管理员可安排赛程')
   if (response) return response
@@ -778,6 +928,12 @@ export async function onRequest(context) {
     if (parts[0] === 'announcements' && parts.length === 2 && method === 'GET') return getAnnouncement(env, parts[1])
     if (parts[0] === 'announcements' && parts.length === 2 && method === 'PUT') return updateAnnouncement(env, request, parts[1])
     if (parts[0] === 'announcements' && parts.length === 2 && method === 'DELETE') return deleteAnnouncement(env, request, parts[1])
+
+    // schedule draft
+    if (parts[0] === 'schedule-draft' && parts.length === 1 && method === 'GET') return getScheduleDraft(env, request)
+    if (parts[0] === 'schedule-draft' && parts.length === 1 && method === 'PUT') return saveScheduleDraft(env, request)
+    if (parts[0] === 'schedule-draft' && parts[1] === 'publish' && method === 'POST') return publishScheduleDraft(env, request)
+    if (parts[0] === 'schedule-draft' && parts[1] === 'discard' && method === 'POST') return discardScheduleDraft(env, request)
 
     // unarranged
     if (parts[0] === 'unarranged' && parts.length === 1 && method === 'GET') return listUnarranged(env)

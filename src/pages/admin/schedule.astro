@@ -6,6 +6,10 @@ import StageTabs from '../../components/StageTabs.astro'
 <BaseLayout title="赛程管理">
   <AdminShell requireRole="admin" allowReferee>
     <h1>赛程管理</h1>
+    <div id="schedule-draft-bar" class="schedule-draft-bar" hidden>
+      <span id="schedule-draft-status">存在未更新的赛程改动</span>
+      <button type="button" id="schedule-publish">更新改动到前台</button>
+    </div>
     <form id="game-form" class="game-form">
       <input name="season" value="26-27" required title="赛季（默认 26-27）">
       <select name="stage">
@@ -76,6 +80,9 @@ import StageTabs from '../../components/StageTabs.astro'
   <style is:global>
     .unarranged-admin-head { display: flex; align-items: center; justify-content: space-between; margin: 24px 0 10px; }
     .unarranged-admin-head h2 { margin: 0; }
+    .schedule-draft-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 16px; padding: 10px 12px; border: 1px solid #b42318; border-radius: 6px; background: #fff4f2; color: #7a271a; font-weight: 700; }
+    .schedule-draft-bar button { padding: 9px 14px; border: 0; border-radius: 5px; background: #b42318; color: #fff; font-weight: 700; cursor: pointer; }
+    .schedule-draft-bar button:hover { background: #8f1c13; }
     .arrange-hint { color: var(--accent); margin: 0 0 12px; }
     .fill-panel { margin-top: 16px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
     .fill-panel h3 { margin: 0 0 10px; font-size: 18px; }
@@ -107,7 +114,11 @@ import StageTabs from '../../components/StageTabs.astro'
     const unarrangedErr = document.getElementById('unarranged-err')!
     const unarrangedToggle = document.getElementById('unarranged-add-toggle') as HTMLButtonElement
     const unarrangedCancel = document.getElementById('unarranged-cancel') as HTMLButtonElement
+    const draftBar = document.getElementById('schedule-draft-bar')!
+    const draftStatus = document.getElementById('schedule-draft-status')!
+    const publishBtn = document.getElementById('schedule-publish') as HTMLButtonElement
     const base = import.meta.env.BASE_URL
+    const TOKEN_KEY = 'pkuml_session_token'
     let editingId: string | null = null
     let arrangeUnarrangedId: string | null = null
     let unarrangedEditingId: string | null = null
@@ -115,6 +126,9 @@ import StageTabs from '../../components/StageTabs.astro'
     let teamsCache: string[] = []
     let gamesCache: any[] = []
     let unarrangedCache: any[] = []
+    let publishedGameIds = new Set<string>()
+    let hasScheduleDraft = false
+    let publishingScheduleDraft = false
     let fillGame: any = null
     let fillSelects: HTMLSelectElement[] = []
     // 赛季__队伍名 -> roster
@@ -124,6 +138,41 @@ import StageTabs from '../../components/StageTabs.astro'
     const showUnarrangedErr = (m: string) => { unarrangedErr.textContent = m }
     const seatSelects = () => [form.seat0, form.seat1, form.seat2, form.seat3]
     const unarrangedSeatSelects = () => [unarrangedForm.useat0, unarrangedForm.useat1, unarrangedForm.useat2, unarrangedForm.useat3]
+
+    async function scheduleDraftRequest(path = '', options: RequestInit = {}) {
+      const token = localStorage.getItem(TOKEN_KEY)
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (token) headers.Authorization = `Bearer ${token}`
+      const res = await fetch(`${base}api/schedule-draft${path}`, { ...options, headers })
+      const body = await res.json().catch(() => ({}))
+      return { ok: res.ok, body, error: body?.error?.message ?? '请求失败' }
+    }
+
+    function updateDraftBar() {
+      const visible = role === 'admin' && hasScheduleDraft
+      draftBar.hidden = !visible
+      if (visible) draftStatus.textContent = '存在未更新的赛程改动，前台仍显示上次发布内容'
+    }
+
+    function renderScheduleRows() {
+      const upcoming = gamesCache.filter((g: any) => g.status === 'upcoming').sort(compareUpcoming)
+      const finished = gamesCache.filter((g: any) => g.status === 'finished').sort(compareFinished)
+      renderRows(upList, upcoming, '暂无赛程。')
+      renderRows(finList, finished, '暂无赛果。')
+      renderUnarrangedRows()
+    }
+
+    async function saveScheduleDraft() {
+      const res = await scheduleDraftRequest('', {
+        method: 'PUT',
+        body: JSON.stringify({ games: gamesCache, unarranged: unarrangedCache }),
+      })
+      if (!res.ok) return res.error
+      hasScheduleDraft = true
+      updateDraftBar()
+      renderScheduleRows()
+      return null
+    }
 
     function fillTeamSelect(sel: HTMLSelectElement) {
       sel.innerHTML = ''
@@ -154,6 +203,7 @@ import StageTabs from '../../components/StageTabs.astro'
       if (error) return showErr('加载失败：' + error.message)
       errEl.textContent = ''
       gamesCache = data ?? []
+      publishedGameIds = new Set(gamesCache.map((game: any) => game.id))
       // 排序与前台一致：赛程 = 阶段正序→日期升序→半庄号升序；赛果 = 相反
       const upcoming = (data ?? []).filter((g: any) => g.status === 'upcoming').sort(compareUpcoming)
       const finished = (data ?? []).filter((g: any) => g.status === 'finished').sort(compareFinished)
@@ -171,6 +221,20 @@ import StageTabs from '../../components/StageTabs.astro'
     }
 
     async function load() {
+      if (role === 'admin') {
+        const res = await scheduleDraftRequest()
+        if (!res.ok) return showErr('加载赛程草稿失败：' + res.error)
+        const { data } = res.body
+        gamesCache = data?.games ?? []
+        unarrangedCache = data?.unarranged ?? []
+        hasScheduleDraft = Boolean(data?.hasChanges)
+        const { data: published, error } = await supabase.from('games').select('*').order('date', { ascending: true })
+        if (error) return showErr('加载已发布赛程失败：' + error.message)
+        publishedGameIds = new Set((published ?? []).map((game: any) => game.id))
+        updateDraftBar()
+        renderScheduleRows()
+        return
+      }
       await Promise.all([loadGames(), loadUnarranged()])
     }
 
@@ -199,7 +263,7 @@ import StageTabs from '../../components/StageTabs.astro'
           const db = document.createElement('button'); db.textContent = '删'; db.dataset.del = g.id
           ops.append(eb, db)
         }
-        if (canOperate && g.status === 'upcoming') {
+        if (canOperate && g.status === 'upcoming' && publishedGameIds.has(g.id)) {
           // 填选手：admin 与裁判均可（裁判拥有所有队长填人权限之和）
           const fb = document.createElement('button'); fb.textContent = '填选手'; fb.dataset.fill = g.id
           fb.style.marginLeft = '8px'
@@ -220,7 +284,7 @@ import StageTabs from '../../components/StageTabs.astro'
           liveLink.textContent = '直播控制台'
           liveLink.style.marginLeft = '8px'
           ops.appendChild(liveLink)
-        } else if (canOperate) {
+        } else if (canOperate && g.status === 'finished') {
           const link = document.createElement('a')
           link.href = base + 'match/?id=' + encodeURIComponent(g.id)
           link.textContent = '赛果'
@@ -402,27 +466,28 @@ import StageTabs from '../../components/StageTabs.astro'
       const el = e.target as HTMLElement
       const id = el.dataset.del ?? el.dataset.edit ?? ''
       if (el.dataset.del) {
-        const { error } = await supabase.from('games').delete().eq('id', id)
-        if (error) return showErr('删除失败：' + error.message)
-        load()
+        if (!window.confirm('确定删除这场赛程吗？该改动将在发布到前台后生效。')) return
+        gamesCache = gamesCache.filter((game) => game.id !== id)
+        const error = await saveScheduleDraft()
+        if (error) return showErr('删除失败：' + error)
       } else if (el.dataset.fill) {
-        const g = gamesCache.find((x) => x.id === el.dataset.fill)
-        if (g) openFill(g)
-      } else if (el.dataset.edit) {
-        const { data, error } = await supabase.from('games').select('*').eq('id', id).single()
+        const { data, error } = await supabase.from('games').select('*').eq('id', el.dataset.fill).single()
         if (error) return showErr('加载失败：' + error.message)
-        if (data) {
-          editingId = data.id
+        if (data) openFill(data)
+      } else if (el.dataset.edit) {
+        const game = gamesCache.find((item) => item.id === id)
+        if (game) {
+          editingId = game.id
           arrangeUnarrangedId = null
           cancelArrangeBtn.style.display = 'none'
           arrangeHint.style.display = 'none'
-          form.season.value = data.season
-          form.stage.value = data.stage
-          form.date.value = data.date
-          form.time.value = data.time ?? ''
-          form.live.value = data.live_status ?? ''
-          form.round.value = (data.round ?? '').match(/(\d+)/)?.[1] ?? ''
-          const seats = data.seats ?? []
+          form.season.value = game.season
+          form.stage.value = game.stage
+          form.date.value = game.date
+          form.time.value = game.time ?? ''
+          form.live.value = game.live_status ?? ''
+          form.round.value = (game.round ?? '').match(/(\d+)/)?.[1] ?? ''
+          const seats = game.seats ?? []
           seatSelects().forEach((s, i) => { s.value = seats[i]?.team ?? '' })
           submitBtn.textContent = '保存'
         }
@@ -434,17 +499,24 @@ import StageTabs from '../../components/StageTabs.astro'
       if (teams.some((t) => !t)) return showErr('请为每个座位选择队伍')
       if (arrangeUnarrangedId) {
         if (!form.date.value) return showErr('请填写日期')
-        const { error } = await supabase.rpc('arrange_unarranged', {
-          p_unarranged_id: arrangeUnarrangedId,
-          p_date: form.date.value,
-          p_time: form.time.value.trim() || null,
-          p_round: form.round.value.trim() ? `第${form.round.value.trim()}半庄` : null,
-          p_live_status: form.live.value.trim() || null,
+        const unarranged = unarrangedCache.find((game) => game.id === arrangeUnarrangedId)
+        if (!unarranged) return showErr('未找到待安排赛程')
+        gamesCache.push({
+          id: crypto.randomUUID(),
+          season: form.season.value.trim(),
+          stage: form.stage.value,
+          date: form.date.value,
+          time: form.time.value.trim() || null,
+          round: form.round.value.trim() ? `第${form.round.value.trim()}半庄` : null,
+          status: 'upcoming',
+          live_status: form.live.value.trim() || null,
+          seats: buildSeats(teams),
         })
-        if (error) return showErr('安排失败：' + error.message)
+        unarrangedCache = unarrangedCache.filter((game) => game.id !== arrangeUnarrangedId)
+        const error = await saveScheduleDraft()
+        if (error) return showErr('安排失败：' + error)
         cancelArrange()
         form.reset(); form.season.value = '26-27'
-        load()
         return
       }
       const payload = {
@@ -457,14 +529,14 @@ import StageTabs from '../../components/StageTabs.astro'
         seats: buildSeats(teams),
       }
       if (editingId) {
-        const { error } = await supabase.from('games').update(payload).eq('id', editingId)
-        if (error) return showErr('保存失败：' + error.message)
+        gamesCache = gamesCache.map((game) => game.id === editingId ? { ...game, ...payload } : game)
         editingId = null; submitBtn.textContent = '新增'
       } else {
-        const { error } = await supabase.from('games').insert([payload])
-        if (error) return showErr('新增失败：' + error.message)
+        gamesCache.push({ id: crypto.randomUUID(), status: 'upcoming', ...payload })
       }
-      form.reset(); load()
+      const error = await saveScheduleDraft()
+      if (error) return showErr('保存失败：' + error)
+      form.reset(); form.season.value = '26-27'
     })
     upList.addEventListener('click', onListClick)
     finList.addEventListener('click', onListClick)
@@ -477,9 +549,10 @@ import StageTabs from '../../components/StageTabs.astro'
       } else if (el.dataset.editU && u) {
         openUnarrangedForm(u)
       } else if (el.dataset.delU) {
-        const { error } = await supabase.from('unarranged_games').delete().eq('id', id)
-        if (error) return showUnarrangedErr('删除失败：' + error.message)
-        load()
+        if (!window.confirm('确定删除这条未安排赛程吗？该改动将在发布到前台后生效。')) return
+        unarrangedCache = unarrangedCache.filter((game) => game.id !== id)
+        const error = await saveScheduleDraft()
+        if (error) return showUnarrangedErr('删除失败：' + error)
       }
     }
     unarrangedList.addEventListener('click', onUnarrangedListClick)
@@ -509,14 +582,44 @@ import StageTabs from '../../components/StageTabs.astro'
         seats: buildSeats(teams),
       }
       if (existing) {
-        const { error } = await supabase.from('unarranged_games').update(payload).eq('id', existing.id)
-        if (error) return showUnarrangedErr('保存失败：' + error.message)
+        unarrangedCache = unarrangedCache.map((game) => game.id === existing.id ? { ...game, ...payload } : game)
       } else {
-        const { error } = await supabase.from('unarranged_games').insert([payload])
-        if (error) return showUnarrangedErr('新增失败：' + error.message)
+        unarrangedCache.push({ id: crypto.randomUUID(), ...payload })
       }
+      const error = await saveScheduleDraft()
+      if (error) return showUnarrangedErr('保存失败：' + error)
       closeUnarrangedForm()
-      load()
+    })
+    publishBtn.addEventListener('click', async () => {
+      if (!hasScheduleDraft || publishingScheduleDraft) return
+      publishingScheduleDraft = true
+      publishBtn.disabled = true
+      const res = await scheduleDraftRequest('/publish', { method: 'POST' })
+      publishingScheduleDraft = false
+      publishBtn.disabled = false
+      if (!res.ok) return showErr('更新前台失败：' + res.error)
+      hasScheduleDraft = false
+      await load()
+    })
+    async function discardScheduleDraftOnLeave() {
+      if (!hasScheduleDraft || publishingScheduleDraft) return
+      const token = localStorage.getItem(TOKEN_KEY)
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (token) headers.Authorization = `Bearer ${token}`
+      try {
+        await fetch(`${base}api/schedule-draft/discard`, { method: 'POST', headers, keepalive: true })
+      } catch {
+        // The browser is already leaving; the next admin visit can still discard a stale draft.
+      }
+    }
+    window.addEventListener('beforeunload', (event) => {
+      if (!hasScheduleDraft || publishingScheduleDraft) return
+      event.preventDefault()
+      event.returnValue = ''
+    })
+    window.addEventListener('pagehide', (event) => {
+      if (event.persisted) return
+      void discardScheduleDraftOnLeave()
     })
     // 赛程/赛果标签切换（默认显示赛程）
     document.querySelectorAll('.stage-tab').forEach((tab) => {
