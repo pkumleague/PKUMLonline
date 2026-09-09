@@ -527,14 +527,14 @@ async function currentSchedule(env) {
 async function scheduleDraftState(env) {
   const row = await env.DB.prepare('select * from schedule_draft_state where id = 1').first()
   if (row) {
-    return {
-      hasChanges: true,
-      baseGames: parseJson(row.base_games, []),
-      games: parseJson(row.draft_games, []),
-      baseUnarranged: parseJson(row.base_unarranged, []),
-      unarranged: parseJson(row.draft_unarranged, []),
-      updatedAt: row.updated_at,
+    const baseGames = parseJson(row.base_games, [])
+    const games = parseJson(row.draft_games, [])
+    const baseUnarranged = parseJson(row.base_unarranged, [])
+    const unarranged = parseJson(row.draft_unarranged, [])
+    if (!sameJson(baseGames, games) || !sameJson(baseUnarranged, unarranged)) {
+      return { hasChanges: true, baseGames, games, baseUnarranged, unarranged, updatedAt: row.updated_at }
     }
+    await env.DB.prepare('delete from schedule_draft_state where id = 1').run()
   }
   const current = await currentSchedule(env)
   return { hasChanges: false, baseGames: current.games, games: current.games, baseUnarranged: current.unarranged, unarranged: current.unarranged, updatedAt: null }
@@ -556,6 +556,10 @@ async function saveScheduleDraft(env, request) {
   if (!validDraftGames(games) || !validDraftUnarranged(unarranged)) return error('invalid schedule draft', 400)
 
   const current = await scheduleDraftState(env)
+  if (sameJson(current.baseGames, games) && sameJson(current.baseUnarranged, unarranged)) {
+    await env.DB.prepare('delete from schedule_draft_state where id = 1').run()
+    return json({ ok: true })
+  }
   await env.DB.prepare(
     `insert into schedule_draft_state (id, base_games, draft_games, base_unarranged, draft_unarranged, updated_at)
      values (1, ?1, ?2, ?3, ?4, datetime('now'))
