@@ -92,7 +92,7 @@ const base = import.meta.env.BASE_URL
       let displayedDealer = null
       let displayedSummaryId = ''
       let summaryTimers = []
-      const tileCodeCache = new Map()
+      const playerCardKeys = []
       const TOP_LEFT_BG_FULL_WIDTH = 506
       const DORA_BG_STEP = 48
 
@@ -152,40 +152,20 @@ const base = import.meta.env.BASE_URL
 
         if (!isNextRound) updateTopInfo(game, current, state.currentDora ?? [])
 
-        const nextText = JSON.stringify({ scores, seats, dealer, waits: state.currentWaits, dora: state.currentDora, currentOrder, updatedAt: state.updatedAt })
+        const nextText = JSON.stringify({
+          scores: scores.map(Number),
+          seats: seats.map(playerCardKey),
+          dealer,
+          round: current.round,
+          waits: state.currentWaits,
+          dora: state.currentDora,
+          currentOrder,
+        })
         if (nextText === lastText) return
         lastText = nextText
 
         const renderScores = scoreChanged ? prevScores : scores
-        board.innerHTML = ''
-        for (let i = 0; i < 4; i++) {
-          const seat = seats[i] ?? {}
-          const team = seat.team ?? ''
-          const player = seat.player ?? seat.name ?? ''
-          const card = document.createElement('article')
-          card.className = 'player-lower'
-          if (i === renderDealer) card.classList.add('dealer')
-          const teamColor = teams.get(team) ?? '#242a33'
-          card.style.setProperty('--team-color', teamColor)
-          card.style.setProperty('--team-rgb', hexToRgb(teamColor))
-          card.innerHTML = `
-            <div class="waits tile-row"></div>
-            <div class="pool-change"></div>
-            <div class="portrait-chip">
-              <span>${escapeHtml(traditionalSeat(seat.seat ?? ['东', '南', '西', '北'][i]))}</span>
-              <small>${escapeHtml(team)}</small>
-            </div>
-            <div class="info-pack">
-              <div class="player">${escapeHtml(player)}</div>
-              <div class="change-delta"></div>
-              <div class="score-plate">
-                <span class="score" data-score="${Number(scores[i] ?? 25000)}">${formatScore(renderScores[i] ?? 25000)}</span>
-              </div>
-            </div>
-          `
-          renderTiles(card.querySelector('.waits'), state.currentWaits?.[i] ?? [], `wait-${i}`)
-          board.appendChild(card)
-        }
+        syncScoreBoard(seats, scores, renderScores, renderDealer, state.currentWaits ?? [], scoreChanged)
         displayedDealer = renderDealer
         previousSettled = current.settled
         if (scoreChanged) {
@@ -203,6 +183,80 @@ const base = import.meta.env.BASE_URL
         }
       }
 
+      function playerCardKey(seat, index) {
+        const player = seat?.player ?? seat?.name ?? ''
+        return JSON.stringify({
+          id: seat?.id ?? seat?.playerId ?? null,
+          player,
+          team: seat?.team ?? '',
+          seat: seat?.seat ?? ['东', '南', '西', '北'][index],
+          avatar: seat?.avatar ?? seat?.avatarUrl ?? seat?.photo ?? null,
+        })
+      }
+
+      function createPlayerCard(seat, index, score) {
+        const team = seat?.team ?? ''
+        const player = seat?.player ?? seat?.name ?? ''
+        const card = document.createElement('article')
+        card.className = 'player-lower'
+        const teamColor = teams.get(team) ?? '#242a33'
+        card.style.setProperty('--team-color', teamColor)
+        card.style.setProperty('--team-rgb', hexToRgb(teamColor))
+
+        const waits = document.createElement('div')
+        waits.className = 'waits tile-row'
+        const poolChange = document.createElement('div')
+        poolChange.className = 'pool-change'
+        const portrait = document.createElement('div')
+        portrait.className = 'portrait-chip'
+        const seatLabel = document.createElement('span')
+        seatLabel.textContent = traditionalSeat(seat?.seat ?? ['东', '南', '西', '北'][index])
+        const teamLabel = document.createElement('small')
+        teamLabel.textContent = team
+        portrait.append(seatLabel, teamLabel)
+        const info = document.createElement('div')
+        info.className = 'info-pack'
+        const playerLabel = document.createElement('div')
+        playerLabel.className = 'player'
+        playerLabel.textContent = player
+        const delta = document.createElement('div')
+        delta.className = 'change-delta'
+        const scorePlate = document.createElement('div')
+        scorePlate.className = 'score-plate'
+        const scoreLabel = document.createElement('span')
+        scoreLabel.className = 'score'
+        scoreLabel.dataset.score = String(Number(score ?? 25000))
+        scoreLabel.textContent = formatScore(score ?? 25000)
+        scorePlate.appendChild(scoreLabel)
+        info.append(playerLabel, delta, scorePlate)
+        card.append(waits, poolChange, portrait, info)
+        return card
+      }
+
+      function syncScoreBoard(seats, scores, renderScores, dealer, waitsBySeat, scoreChanged) {
+        for (let i = 0; i < 4; i++) {
+          const seat = seats[i] ?? {}
+          const key = playerCardKey(seat, i)
+          let card = board.children[i]
+          if (!card || playerCardKeys[i] !== key) {
+            const replacement = createPlayerCard(seat, i, renderScores[i] ?? 25000)
+            if (card) board.replaceChild(replacement, card)
+            else board.appendChild(replacement)
+            card = replacement
+            playerCardKeys[i] = key
+          }
+          card.classList.toggle('dealer', i === dealer)
+          const scoreLabel = card.querySelector('.score')
+          if (scoreLabel) {
+            scoreLabel.dataset.score = String(Number(scores[i] ?? 25000))
+            if (!scoreChanged) scoreLabel.textContent = formatScore(scores[i] ?? 25000)
+          }
+          renderTiles(card.querySelector('.waits'), waitsBySeat[i] ?? [])
+        }
+        while (board.children.length > 4) board.lastElementChild?.remove()
+        playerCardKeys.length = 4
+      }
+
       function updateTopInfo(game, current, doraCodes, withTransition = false) {
         const nextRoundKey = topInfoKey(current)
         if (!topInitialized) {
@@ -211,7 +265,7 @@ const base = import.meta.env.BASE_URL
           return
         }
         if (!withTransition) {
-          renderTiles(doraTiles, doraCodes, 'dora')
+          renderTiles(doraTiles, doraCodes)
           return
         }
         if (withTransition) {
@@ -334,9 +388,8 @@ const base = import.meta.env.BASE_URL
         updateTopLeftBackground([])
         doraTiles.classList.add('dora-clearing')
         window.setTimeout(() => {
-          tileCodeCache.set('dora', [])
           doraTiles.classList.remove('has-tiles', 'tiles-exiting', 'dora-clearing')
-          doraTiles.innerHTML = ''
+          doraTiles.querySelectorAll('.tile').forEach((tile) => tile.remove())
         }, 500)
       }
 
@@ -349,11 +402,10 @@ const base = import.meta.env.BASE_URL
         displayedTopKey = nextRoundKey
         if (clearEmptyDora && doraCodes.length === 0) {
           updateTopLeftBackground([])
-          tileCodeCache.set('dora', [])
           doraTiles.classList.remove('has-tiles', 'tiles-exiting')
-          doraTiles.innerHTML = ''
+          doraTiles.querySelectorAll('.tile').forEach((tile) => tile.remove())
         } else {
-          renderTiles(doraTiles, doraCodes, 'dora')
+          renderTiles(doraTiles, doraCodes)
         }
       }
 
@@ -529,38 +581,37 @@ const base = import.meta.env.BASE_URL
         return `${parseInt(value.slice(0, 2), 16)} ${parseInt(value.slice(2, 4), 16)} ${parseInt(value.slice(4, 6), 16)}`
       }
 
-      function renderTiles(root, codes, cacheKey = '') {
+      function renderTiles(root, codes) {
         if (!root) return
         const visibleCodes = (codes ?? []).filter(Boolean)
-        if (cacheKey === 'dora') updateTopLeftBackground(visibleCodes)
-        const previousCodes = cacheKey ? (tileCodeCache.get(cacheKey) ?? []) : []
-        const previousText = previousCodes.join(',')
-        const nextText = visibleCodes.join(',')
-        if (cacheKey && previousText === nextText && root.childElementCount > 0) {
-          root.classList.toggle('has-tiles', visibleCodes.length > 0)
-          return
-        }
-        if (cacheKey) tileCodeCache.set(cacheKey, [...visibleCodes])
-        root.innerHTML = ''
-        if (visibleCodes.length === 0 && previousCodes.length > 0) {
-          root.classList.add('has-tiles', 'tiles-exiting')
-          for (const code of previousCodes) {
-            const img = buildTileImg(code)
-            img.classList.add('exiting')
-            root.appendChild(img)
+        if (root === doraTiles) updateTopLeftBackground(visibleCodes)
+        const existing = new Map([...root.querySelectorAll('.tile:not(.exiting)')].map((tile) => [tile.dataset.tileKey, tile]))
+        const occurrences = new Map()
+        const wanted = visibleCodes.map((code) => {
+          const occurrence = occurrences.get(code) ?? 0
+          occurrences.set(code, occurrence + 1)
+          const key = `${code}-${occurrence}`
+          const tile = existing.get(key)
+          if (tile) {
+            existing.delete(key)
+            return tile
           }
+          const inserted = buildTileImg(code)
+          inserted.dataset.tileKey = key
+          inserted.classList.add('entering')
+          return inserted
+        })
+        existing.forEach((tile) => {
+          tile.classList.remove('entering')
+          tile.classList.add('exiting')
           window.setTimeout(() => {
-            root.classList.remove('has-tiles', 'tiles-exiting')
-            root.innerHTML = ''
+            tile.remove()
+            if (!root.querySelector('.tile:not(.exiting)')) root.classList.remove('has-tiles', 'tiles-exiting')
           }, 500)
-          return
-        }
-        for (const code of visibleCodes) {
-          const img = buildTileImg(code)
-          img.classList.add('entering')
-          root.appendChild(img)
-        }
-        root.classList.toggle('has-tiles', visibleCodes.length > 0)
+        })
+        wanted.forEach((tile) => root.appendChild(tile))
+        root.classList.toggle('has-tiles', wanted.length > 0 || existing.size > 0)
+        root.classList.toggle('tiles-exiting', wanted.length === 0 && existing.size > 0)
       }
 
       function updateTopLeftBackground(doraCodes) {
