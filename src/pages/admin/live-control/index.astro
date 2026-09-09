@@ -695,6 +695,10 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
         tenpai: form.winType === 'draw' ? [...form.tenpai] : null,
         override: undefined,
       }
+      if (editingOrder != null && editMode === 'edit') {
+        const incompatibility = editIncompatibility(order, payload)
+        if (incompatibility) return showErr(incompatibility)
+      }
       const existing = rounds.findIndex((round) => round.order === order)
       if (existing >= 0) rounds[existing] = payload
       else rounds.push(payload)
@@ -714,6 +718,35 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       publish()
       render()
       if (!next) showErr(finalPoolMessage(replayGame(rounds)) || '南四非连庄结果已录完，可以导出 JSON 并导入官网。')
+    }
+
+    function editIncompatibility(order: number, replacement: StoredRound): string {
+      const nextResetOrder = rounds
+        .filter((round) => round.order > order && round.reset)
+        .sort((a, b) => a.order - b.order)[0]?.order ?? Infinity
+      const followingOrders = rounds
+        .filter((round) => round.order > order && round.order < nextResetOrder && !round.reset && round.win_type)
+        .map((round) => round.order)
+      if (!followingOrders.length) return ''
+
+      const changedRounds = rounds.map((round) => round.order === order ? replacement : round)
+      const originalHistory = new Map(replayGame(rounds).history.map((round) => [round.order, round]))
+      const changedHistory = new Map(replayGame(changedRounds).history.map((round) => [round.order, round]))
+      for (const followingOrder of followingOrders) {
+        const original = originalHistory.get(followingOrder)
+        const changed = changedHistory.get(followingOrder)
+        if (!original || !changed) {
+          return `不允许保存：这项修改会让后续已录的小局提前失效。请使用“回退”后重录。`
+        }
+        if (
+          original.round.wind !== changed.round.wind ||
+          original.round.number !== changed.round.number ||
+          original.round.honba !== changed.round.honba
+        ) {
+          return `不允许保存：修改后第 ${followingOrder} 局会从${roundLabel(original.round)}变为${roundLabel(changed.round)}，与后续记录不兼容（含连庄/本场变化）。请使用“回退”后重录。`
+        }
+      }
+      return ''
     }
 
     function resetForm() {
