@@ -111,7 +111,9 @@ const base = import.meta.env.BASE_URL
           const res = await fetch(`${apiBase}api/games/${encodeURIComponent(gameId)}/live-state`, { cache: 'no-store' })
           if (!res.ok) return
           const body = await res.json()
-          if (body?.data && body.data.updatedAt !== remoteState?.updatedAt) {
+          const incomingAt = Date.parse(body?.data?.updatedAt ?? '')
+          const displayedAt = Date.parse(remoteState?.updatedAt ?? '')
+          if (body?.data && body.data.updatedAt !== remoteState?.updatedAt && (!Number.isFinite(displayedAt) || incomingAt >= displayedAt)) {
             remoteState = body.data
             render()
           }
@@ -609,7 +611,15 @@ const base = import.meta.env.BASE_URL
             if (!root.querySelector('.tile:not(.exiting)')) root.classList.remove('has-tiles', 'tiles-exiting')
           }, 500)
         })
-        wanted.forEach((tile) => root.appendChild(tile))
+        let cursor = root.querySelector('.tile:not(.exiting)')
+        wanted.forEach((tile) => {
+          if (tile !== cursor) root.insertBefore(tile, cursor)
+          if (tile.classList.contains('entering')) {
+            window.setTimeout(() => tile.classList.remove('entering'), 900)
+          }
+          cursor = tile.nextElementSibling
+          while (cursor?.classList.contains('exiting')) cursor = cursor.nextElementSibling
+        })
         root.classList.toggle('has-tiles', wanted.length > 0 || existing.size > 0)
         root.classList.toggle('tiles-exiting', wanted.length === 0 && existing.size > 0)
       }
@@ -646,8 +656,12 @@ const base = import.meta.env.BASE_URL
 
       window.addEventListener('storage', (event) => {
         if (event.key === key) {
-          remoteState = null
-          render()
+          try {
+            remoteState = event.newValue ? JSON.parse(event.newValue) : null
+            render()
+          } catch {
+            remoteState = null
+          }
         }
       })
       render()
