@@ -19,6 +19,9 @@ const { onRequest } = await import('../functions/api/[[path]].ts')
 
 const db = new DatabaseSync(':memory:')
 db.exec(readFileSync(new URL('../migrations/0001_init.sql', import.meta.url), 'utf8'))
+db.exec(readFileSync(new URL('../migrations/0002_live_state.sql', import.meta.url), 'utf8'))
+db.exec(readFileSync(new URL('../migrations/0003_schedule_draft.sql', import.meta.url), 'utf8'))
+db.exec(readFileSync(new URL('../migrations/0004_live_reliability.sql', import.meta.url), 'utf8'))
 
 class MockStatement {
   constructor(db, sql) {
@@ -179,6 +182,52 @@ const afterCaptain = r.data.data
 assert(afterCaptain.seats[0].player === '樱花队长选人', 'captain assignment should set player on own team seat')
 assert(afterCaptain.seats[1].player === '雷电选手', 'captain assignment should not modify other seats')
 const currentSeats = afterCaptain.seats
+
+// ---- reliable live state revision / conflict / source acknowledgement ----
+r = await call(`/games/${gameId}/live-state`)
+assert(r.status === 200 && r.data.revision === 0 && r.data.data === null, 'new live state should start at revision 0')
+
+const liveState1 = { gameId, rounds: [], updatedAt: new Date().toISOString() }
+r = await call(`/games/${gameId}/live-state`, {
+  method: 'PUT',
+  token: refereeToken,
+  body: { state: liveState1, baseRevision: 0 },
+})
+assert(r.status === 200 && r.data.revision === 1, `first live publish should create revision 1, got ${r.status} ${JSON.stringify(r.data)}`)
+
+r = await call(`/games/${gameId}/live-state`, {
+  method: 'PUT',
+  token: refereeToken,
+  body: { state: { ...liveState1, updatedAt: new Date().toISOString() }, baseRevision: 0 },
+})
+assert(r.status === 409 && r.data.error?.currentRevision === 1, 'stale live publish should be rejected with current revision')
+
+r = await call(`/games/${gameId}/live-state`, {
+  method: 'PUT',
+  token: refereeToken,
+  body: { state: { ...liveState1, updatedAt: new Date().toISOString() }, baseRevision: 1 },
+})
+assert(r.status === 200 && r.data.revision === 2, 'matching live revision should advance atomically')
+
+const retriedLiveState = { ...liveState1, publishId: crypto.randomUUID(), updatedAt: new Date().toISOString() }
+r = await call(`/games/${gameId}/live-state`, {
+  method: 'PUT',
+  token: refereeToken,
+  body: { state: retriedLiveState, baseRevision: 2 },
+})
+assert(r.status === 200 && r.data.revision === 3, 'idempotent live publish should advance once')
+r = await call(`/games/${gameId}/live-state`, {
+  method: 'PUT',
+  token: refereeToken,
+  body: { state: retriedLiveState, baseRevision: 2 },
+})
+assert(r.status === 200 && r.data.revision === 3 && r.data.duplicate === true, 'retry after a lost response should reuse the saved revision')
+
+r = await call(`/games/${gameId}/live-ack`, { method: 'POST', body: { sourceId: 'main', revision: 3 } })
+assert(r.status === 200, `live source acknowledgement should succeed, got ${r.status}`)
+
+r = await call(`/games/${gameId}/live-ack?sourceId=main`, { token: refereeToken })
+assert(r.status === 200 && r.data.data?.revision === 3, 'referee should read the live source acknowledgement')
 
 // ---- rounds upsert / update / delete ----
 r = await call(`/games/${gameId}/rounds`, {

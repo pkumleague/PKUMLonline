@@ -45,6 +45,7 @@ const base = import.meta.env.BASE_URL
       </section>
 
       <section id="score-board" class="score-board"></section>
+      <div id="connection-warning" class="connection-warning" role="status">直播数据连接中断</div>
       <section id="summary-scene" class="summary-scene" aria-hidden="true">
         <header id="summary-heading" class="summary-heading"></header>
         <div id="summary-chart" class="summary-chart"></div>
@@ -62,6 +63,7 @@ const base = import.meta.env.BASE_URL
 
       const params = new URLSearchParams(location.search)
       const gameId = params.get('id') ?? 'default'
+      const sourceId = params.get('source')
       const key = liveStorageKey(gameId)
       const apiBase = import.meta.env.BASE_URL
       const teams = new Map((teamsRaw.teams ?? []).map((team) => [team.name, team.color]))
@@ -73,6 +75,7 @@ const base = import.meta.env.BASE_URL
       const poolLabel = document.getElementById('pool-label')
       const doraTiles = document.getElementById('dora-tiles')
       const board = document.getElementById('score-board')
+      const connectionWarning = document.getElementById('connection-warning')
       const summaryScene = document.getElementById('summary-scene')
       const summaryHeading = document.getElementById('summary-heading')
       const summaryChart = document.getElementById('summary-chart')
@@ -83,15 +86,26 @@ const base = import.meta.env.BASE_URL
 
       let lastText = ''
       let remoteState = null
+      let remoteRevision = 0
       let displayedScores = null
       let previousSettled = 0
       let animationTimer = 0
       let topTransitionTimer = 0
+      let topWipeTimer = 0
+      let topTransitionRun = 0
       let topInitialized = false
       let displayedTopKey = ''
       let displayedDealer = null
       let displayedSummaryId = ''
       let summaryTimers = []
+      let scoreAnimationRun = 0
+      let scoreAnimationTimers = []
+      let animationTargetScores = null
+      let lastRemoteSuccessAt = Date.now()
+      let lastAckAt = 0
+      let ackInFlight = false
+      let readyAckRevision = 0
+      let ackReadyTimer = 0
       const playerCardKeys = []
       const TOP_LEFT_BG_FULL_WIDTH = 506
       const DORA_BG_STEP = 48
@@ -107,19 +121,69 @@ const base = import.meta.env.BASE_URL
       }
 
       async function refreshRemoteState() {
+        const controller = new AbortController()
+        const timeout = window.setTimeout(() => controller.abort(), 4000)
         try {
-          const res = await fetch(`${apiBase}api/games/${encodeURIComponent(gameId)}/live-state`, { cache: 'no-store' })
-          if (!res.ok) return
+          const res = await fetch(`${apiBase}api/games/${encodeURIComponent(gameId)}/live-state`, {
+            cache: 'no-store',
+            signal: controller.signal,
+          })
+          if (!res.ok) throw new Error(`HTTP ${res.status}`)
           const body = await res.json()
-          const incomingAt = Date.parse(body?.data?.updatedAt ?? '')
-          const displayedAt = Date.parse(remoteState?.updatedAt ?? '')
-          if (body?.data && body.data.updatedAt !== remoteState?.updatedAt && (!Number.isFinite(displayedAt) || incomingAt >= displayedAt)) {
-            remoteState = body.data
-            render()
+          const incomingRevision = Number(body?.revision ?? 0)
+          lastRemoteSuccessAt = Date.now()
+          connectionWarning?.classList.remove('visible')
+          if (!body?.data) {
+            remoteState = null
+            remoteRevision = 0
+            overlay?.classList.add('is-empty')
+            return
           }
+          if (incomingRevision > remoteRevision) {
+            remoteState = body.data
+            remoteRevision = incomingRevision
+            render()
+            scheduleRevisionAcknowledgement(incomingRevision)
+          }
+          void acknowledgeRevision(readyAckRevision)
         } catch {
-          // localStorage fallback keeps ordinary browser preview usable.
+          if (Date.now() - lastRemoteSuccessAt > 5000) connectionWarning?.classList.add('visible')
+        } finally {
+          window.clearTimeout(timeout)
         }
+      }
+
+      async function acknowledgeRevision(revision) {
+        if (!sourceId || revision < 1 || ackInFlight) return
+        const now = Date.now()
+        if (now - lastAckAt < 3000) return
+        ackInFlight = true
+        try {
+          const res = await fetch(`${apiBase}api/games/${encodeURIComponent(gameId)}/live-ack`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sourceId, revision }),
+          })
+          if (res.ok) lastAckAt = now
+        } catch {
+          // The read loop remains authoritative and retries the heartbeat later.
+        } finally {
+          ackInFlight = false
+        }
+      }
+
+      function scheduleRevisionAcknowledgement(revision) {
+        readyAckRevision = 0
+        window.clearTimeout(ackReadyTimer)
+        ackReadyTimer = window.setTimeout(() => {
+          readyAckRevision = revision
+          void acknowledgeRevision(revision)
+        }, 3600)
+      }
+
+      async function pollRemoteState() {
+        await refreshRemoteState()
+        window.setTimeout(pollRemoteState, 500)
       }
 
       function render() {
@@ -138,6 +202,19 @@ const base = import.meta.env.BASE_URL
         const game = state.game ?? {}
         const currentOrder = current.settled + 1
         const dealer = dealerSeat(current.round)
+        const nextText = JSON.stringify({
+          scores: scores.map(Number),
+          seats: seats.map(playerCardKey),
+          dealer,
+          round: current.round,
+          waits: state.currentWaits,
+          dora: state.currentDora,
+          currentOrder,
+        })
+        if (nextText === lastText) return
+        lastText = nextText
+        if (animationTargetScores) cancelScoreAnimation(true)
+        cancelTopTransition()
         const prevScores = displayedScores
         const scoreChanged = Array.isArray(prevScores) && scores.some((score, i) => Number(score) !== Number(prevScores[i]))
         const deltas = scoreChanged ? scores.map((score, i) => Number(score) - Number(prevScores[i] ?? score)) : [0, 0, 0, 0]
@@ -154,18 +231,6 @@ const base = import.meta.env.BASE_URL
 
         if (!isNextRound) updateTopInfo(game, current, state.currentDora ?? [])
 
-        const nextText = JSON.stringify({
-          scores: scores.map(Number),
-          seats: seats.map(playerCardKey),
-          dealer,
-          round: current.round,
-          waits: state.currentWaits,
-          dora: state.currentDora,
-          currentOrder,
-        })
-        if (nextText === lastText) return
-        lastText = nextText
-
         const renderScores = scoreChanged ? prevScores : scores
         syncScoreBoard(seats, scores, renderScores, renderDealer, state.currentWaits ?? [], scoreChanged)
         displayedDealer = renderDealer
@@ -177,12 +242,22 @@ const base = import.meta.env.BASE_URL
           displayedScores = scores.map(Number)
         }
         if (isNextRound) {
-          window.clearTimeout(topTransitionTimer)
+          const run = topTransitionRun
           topTransitionTimer = window.setTimeout(() => {
-            updateTopInfo(game, current, state.currentDora ?? [], true)
+            if (run !== topTransitionRun) return
+            updateTopInfo(game, current, state.currentDora ?? [], true, run)
             setDisplayedDealer(dealer)
-          }, 6000)
+          }, 2500)
         }
+      }
+
+      function cancelTopTransition() {
+        topTransitionRun += 1
+        window.clearTimeout(topTransitionTimer)
+        window.clearTimeout(topWipeTimer)
+        overlay?.querySelectorAll('.top-wipe-layer').forEach((layer) => layer.remove())
+        scoreBug?.classList.remove('top-hidden')
+        doraBug?.classList.remove('top-hidden')
       }
 
       function playerCardKey(seat, index) {
@@ -260,7 +335,7 @@ const base = import.meta.env.BASE_URL
         playerCardKeys.length = 4
       }
 
-      function updateTopInfo(game, current, doraCodes, withTransition = false) {
+      function updateTopInfo(game, current, doraCodes, withTransition = false, run = topTransitionRun) {
         const nextRoundKey = topInfoKey(current)
         if (!topInitialized) {
           setTopInfo(game, current, doraCodes, nextRoundKey, false)
@@ -272,7 +347,7 @@ const base = import.meta.env.BASE_URL
           return
         }
         if (withTransition) {
-          wipeTopInfo(game, current, doraCodes, nextRoundKey)
+          wipeTopInfo(game, current, doraCodes, nextRoundKey, run)
           return
         }
       }
@@ -422,7 +497,7 @@ const base = import.meta.env.BASE_URL
         return JSON.stringify({ round: current.round, pool: current.pool })
       }
 
-      function wipeTopInfo(game, current, doraCodes, nextRoundKey) {
+      function wipeTopInfo(game, current, doraCodes, nextRoundKey, run) {
         const oldLayer = buildTopWipeLayer('old')
         const newLayer = buildTopWipeLayer('new')
         if (!oldLayer || !newLayer) {
@@ -437,7 +512,8 @@ const base = import.meta.env.BASE_URL
         oldLayer.classList.add('wipe-old')
         newLayer.classList.add('wipe-new')
 
-        window.setTimeout(() => {
+        topWipeTimer = window.setTimeout(() => {
+          if (run !== topTransitionRun) return
           oldLayer.remove()
           newLayer.remove()
           scoreBug?.classList.remove('top-hidden')
@@ -498,7 +574,9 @@ const base = import.meta.env.BASE_URL
       }
 
       function playScoreChange(nextScores, deltas, poolEntries) {
-        window.clearTimeout(animationTimer)
+        cancelScoreAnimation(false)
+        const run = scoreAnimationRun
+        animationTargetScores = nextScores.map(Number)
         const cards = [...board.querySelectorAll('.player-lower')]
         cards.forEach((card, i) => {
           card.classList.add('score-changing')
@@ -513,29 +591,65 @@ const base = import.meta.env.BASE_URL
           }
         })
 
-        animationTimer = window.setTimeout(() => {
+        animationTimer = scheduleScoreAnimation(run, () => {
           cards.forEach((card) => card.classList.add('show-delta'))
-          window.setTimeout(() => {
+          scheduleScoreAnimation(run, () => {
             cards.forEach((card) => card.classList.add('hide-delta'))
             cards.forEach((card, i) => {
               const scoreEl = card.querySelector('.score')
               if (!scoreEl) return
-              animateNumber(scoreEl, displayedScores[i], Number(nextScores[i] ?? 0), 2000)
+              animateNumber(scoreEl, displayedScores[i], Number(nextScores[i] ?? 0), 1000, run)
             })
-            window.setTimeout(() => {
+            scheduleScoreAnimation(run, () => {
               cards.forEach((card) => card.classList.add('info-return'))
               displayedScores = nextScores.map(Number)
-              window.setTimeout(() => {
+              animationTargetScores = null
+              scheduleScoreAnimation(run, () => {
                 cards.forEach((card) => card.classList.remove('score-changing', 'show-delta', 'hide-delta', 'info-return'))
-              }, 500)
-            }, 2000)
-          }, 2500)
-        }, 500)
+              }, 300)
+            }, 1000)
+          }, 900)
+        }, 250)
       }
 
-      function animateNumber(el, from, to, duration) {
+      function scheduleScoreAnimation(run, callback, delay) {
+        const timer = window.setTimeout(() => {
+          if (run === scoreAnimationRun) callback()
+        }, delay)
+        scoreAnimationTimers.push(timer)
+        return timer
+      }
+
+      function cancelScoreAnimation(settle) {
+        scoreAnimationRun += 1
+        window.clearTimeout(animationTimer)
+        scoreAnimationTimers.forEach((timer) => window.clearTimeout(timer))
+        scoreAnimationTimers = []
+        const cards = [...board.querySelectorAll('.player-lower')]
+        if (settle && animationTargetScores) {
+          displayedScores = animationTargetScores.map(Number)
+          cards.forEach((card, i) => {
+            const scoreEl = card.querySelector('.score')
+            if (scoreEl) scoreEl.textContent = formatScore(displayedScores[i] ?? 0)
+          })
+        }
+        cards.forEach((card) => {
+          card.classList.remove('score-changing', 'show-delta', 'hide-delta', 'info-return')
+          const delta = card.querySelector('.change-delta')
+          const pool = card.querySelector('.pool-change')
+          if (delta) delta.textContent = ''
+          if (pool) {
+            pool.innerHTML = ''
+            pool.classList.remove('has-pool-change')
+          }
+        })
+        animationTargetScores = null
+      }
+
+      function animateNumber(el, from, to, duration, run) {
         const start = performance.now()
         const tick = (now) => {
+          if (run !== scoreAnimationRun) return
           const progress = Math.min(1, (now - start) / duration)
           const eased = 1 - Math.pow(1 - progress, 3)
           el.textContent = formatScore(Math.round(from + (to - from) * eased))
@@ -672,8 +786,7 @@ const base = import.meta.env.BASE_URL
         }
       })
       render()
-      void refreshRemoteState()
-      setInterval(refreshRemoteState, 500)
+      void pollRemoteState()
     </script>
 
     <style is:global>
@@ -698,6 +811,23 @@ const base = import.meta.env.BASE_URL
         background: transparent;
         pointer-events: none;
       }
+
+      .connection-warning {
+        position: absolute;
+        top: 138px;
+        left: 50%;
+        z-index: 20;
+        display: none;
+        padding: 8px 16px;
+        color: #fff;
+        font-size: 20px;
+        font-weight: 800;
+        background: rgb(185 28 28 / 90%);
+        border-radius: 8px;
+        transform: translateX(-50%);
+      }
+
+      .connection-warning.visible { display: block; }
 
       .overlay::before {
         position: absolute;

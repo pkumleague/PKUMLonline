@@ -6,6 +6,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
   <AdminShell>
     <h1>直播控制台</h1>
     <p id="live-err" class="admin-err"></p>
+    <p id="live-sync" class="live-sync" data-kind="idle" aria-live="polite">尚未连接直播源</p>
     <div id="live-root" class="live-root">
       <p class="empty">加载中...</p>
     </div>
@@ -76,6 +77,10 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
     .restart-panel h2 { margin: 0 0 10px; font-size: 20px; }
     .import-hint { color: var(--muted); font-size: 13px; }
     .overlay-link { word-break: break-all; }
+    .live-sync { margin: 6px 0 14px; font-size: 14px; font-weight: 700; }
+    .live-sync[data-kind='ok'] { color: #177a37; }
+    .live-sync[data-kind='busy'], .live-sync[data-kind='waiting'] { color: #9a6700; }
+    .live-sync[data-kind='error'] { color: #b91c1c; }
     @media (max-width: 980px) {
       .live-grid { grid-template-columns: 1fr; }
       .score-strip { grid-template-columns: repeat(2, 1fr); }
@@ -97,12 +102,19 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
     const points = pointsRaw as PointsTable
     const base = import.meta.env.BASE_URL
     const errEl = document.getElementById('live-err')!
+    const syncEl = document.getElementById('live-sync')!
     const root = document.getElementById('live-root')!
     const params = new URLSearchParams(location.search)
     const gameId = params.get('id')
     const teams = new Map((teamsRaw.teams ?? []).map((team: any) => [team.name, team.color]))
     const TOKEN_KEY = 'pkuml_session_token'
+    const OVERLAY_SOURCE_ID = 'main'
     let publishTimer: ReturnType<typeof setTimeout> | null = null
+    let pendingPublish: any = null
+    let publishInFlight = false
+    let publishError = false
+    let serverRevision = 0
+    let expectedOverlayRevision = 0
 
     const FU = ['20', '25', '30', '40', '50', '60', '70']
     const HAN = ['1', '2', '3', '4']
@@ -147,6 +159,10 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
 
     function showErr(message: string) { errEl.textContent = message }
     function clearErr() { errEl.textContent = '' }
+    function showSync(message: string, kind: 'idle' | 'busy' | 'waiting' | 'ok' | 'error' = 'idle') {
+      syncEl.textContent = message
+      syncEl.dataset.kind = kind
+    }
     function el(tag: string, cls = '', text = ''): HTMLElement {
       const node = document.createElement(tag)
       if (cls) node.className = cls
@@ -270,24 +286,64 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
         return
       }
       game = g
-      restore()
+      await restore()
       render()
+      expectedOverlayRevision = serverRevision
+      void checkOverlayStatus()
+      window.setInterval(checkOverlayStatus, 2000)
     }
 
-    function restore() {
+    async function restore() {
+      let localState: any = null
       try {
         const raw = localStorage.getItem(draftStorageKey()) ?? localStorage.getItem(liveStorageKey(gameId!))
-        if (!raw) return
-        const state = JSON.parse(raw)
-        rounds = state.rounds ?? []
-        currentDora = state.currentDora ?? []
-        currentWaits = state.currentWaits ?? [[], [], [], []]
-        if (Array.isArray(state.currentRiichi)) form.riichi = [0, 1, 2, 3].map((i) => Boolean(state.currentRiichi[i]))
-        liveOnly = state.liveOnly ?? emptyLiveOnly()
-        liveOnly.scoreOverridesByOrder = {}
+        if (raw) localState = JSON.parse(raw)
       } catch {
-        rounds = []
+        localState = null
       }
+
+      let remoteState: any = null
+      let remoteAvailable = false
+      try {
+        const res = await fetch(`${base}api/games/${encodeURIComponent(gameId!)}/live-state`, { cache: 'no-store' })
+        if (res.ok) {
+          remoteAvailable = true
+          const body = await res.json()
+          remoteState = body?.data ?? null
+          serverRevision = Number(body?.revision ?? 0)
+        } else {
+          showSync(`远端直播状态读取失败：HTTP ${res.status}`, 'error')
+        }
+      } catch {
+        showSync('远端直播状态不可用，已尝试恢复本机草稿', 'error')
+      }
+
+      const localMatchesRemote = localState && Number(localState.baseRevision ?? -1) === serverRevision
+      const localIsNewer = Date.parse(localState?.updatedAt ?? '') > Date.parse(remoteState?.updatedAt ?? '')
+      if (localMatchesRemote && localIsNewer) {
+        applyLiveState(localState)
+        showSync(`已恢复 revision ${serverRevision} 上的未放送本机草稿`, 'waiting')
+      } else if (remoteState) {
+        applyLiveState(remoteState)
+        showSync(`已恢复服务器直播状态 revision ${serverRevision}`, 'waiting')
+      } else if (localState) {
+        applyLiveState(localState)
+        showSync(
+          remoteAvailable ? '服务器尚无直播状态，已恢复本机草稿' : '远端不可用，已恢复本机草稿；放送前请确认连接',
+          remoteAvailable ? 'waiting' : 'error',
+        )
+      } else if (remoteAvailable) {
+        showSync('服务器尚无直播状态', 'idle')
+      }
+    }
+
+    function applyLiveState(state: any) {
+      rounds = state.rounds ?? []
+      currentDora = state.currentDora ?? []
+      currentWaits = state.currentWaits ?? [[], [], [], []]
+      if (Array.isArray(state.currentRiichi)) form.riichi = [0, 1, 2, 3].map((i) => Boolean(state.currentRiichi[i]))
+      liveOnly = state.liveOnly ?? emptyLiveOnly()
+      liveOnly.scoreOverridesByOrder = {}
     }
 
     function draftStorageKey() {
@@ -305,6 +361,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
         currentRiichi: [...form.riichi],
         scoreOverride: null,
         liveOnly,
+        baseRevision: serverRevision,
         ...(summary ? { summary } : {}),
         updatedAt: new Date().toISOString(),
       }
@@ -317,29 +374,76 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
 
     function publish(summary?: { id: string }) {
       if (!gameId) return
-      const state = buildLiveState(summary)
+      const state = JSON.parse(JSON.stringify(buildLiveState(summary)))
+      state.publishId = crypto.randomUUID()
       localStorage.setItem(draftStorageKey(), JSON.stringify(state))
-      localStorage.setItem(liveStorageKey(gameId), JSON.stringify(state))
       queueRemotePublish(state)
     }
 
     function publishToOverlay() {
       if (!game) return
       publish()
-      showErr('已放送到直播画面')
     }
 
     function queueRemotePublish(state: any) {
+      publishError = false
       if (publishTimer) clearTimeout(publishTimer)
       publishTimer = setTimeout(() => {
         publishTimer = null
-        void publishRemote(state)
+        pendingPublish = state
+        void drainPublishQueue()
       }, 120)
     }
 
-    async function publishRemote(state: any) {
+    async function drainPublishQueue() {
+      if (publishInFlight) return
+      publishInFlight = true
+      try {
+        while (pendingPublish) {
+          const state = pendingPublish
+          pendingPublish = null
+          showSync('正在发送最新直播状态…', 'busy')
+          try {
+            const result = await publishRemoteWithRetry(state, serverRevision)
+            serverRevision = result.revision
+            expectedOverlayRevision = result.revision
+            localStorage.setItem(liveStorageKey(gameId!), JSON.stringify({ ...state, baseRevision: result.revision }))
+            saveDraftState()
+            showSync(`服务器已接收 revision ${result.revision}，等待直播源显示…`, 'waiting')
+            void checkOverlayStatus()
+          } catch (e: any) {
+            publishError = true
+            const message = e?.message ?? String(e)
+            showErr(message)
+            showSync(message, 'error')
+            pendingPublish = null
+            break
+          }
+        }
+      } finally {
+        publishInFlight = false
+      }
+    }
+
+    async function publishRemoteWithRetry(state: any, baseRevision: number) {
+      let lastError: Error | null = null
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          return await publishRemote(state, baseRevision)
+        } catch (e: any) {
+          lastError = e instanceof Error ? e : new Error(String(e))
+          if (e?.status === 401 || e?.status === 403 || e?.status === 409 || attempt === 3) throw lastError
+          await new Promise((resolve) => window.setTimeout(resolve, attempt * 400))
+        }
+      }
+      throw lastError ?? new Error('直播状态同步失败')
+    }
+
+    async function publishRemote(state: any, baseRevision: number): Promise<{ revision: number }> {
       const token = localStorage.getItem(TOKEN_KEY)
-      if (!token || !gameId) return
+      if (!token || !gameId) throw new Error('登录状态已失效，直播状态未放送')
+      const controller = new AbortController()
+      const timeout = window.setTimeout(() => controller.abort(), 5000)
       try {
         const res = await fetch(`${base}api/games/${encodeURIComponent(gameId)}/live-state`, {
           method: 'PUT',
@@ -347,14 +451,47 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({ state }),
+          body: JSON.stringify({ state, baseRevision }),
+          signal: controller.signal,
         })
         if (!res.ok) {
           const body = await res.json().catch(() => null)
-          showErr('直播源同步失败：' + (body?.error?.message ?? `HTTP ${res.status}`))
+          const detail = res.status === 409
+            ? `直播状态已被其他操作端更新（服务器 revision ${body?.error?.currentRevision ?? '?'}），请刷新页面后再操作`
+            : `直播源同步失败：${body?.error?.message ?? `HTTP ${res.status}`}`
+          const failure: any = new Error(detail)
+          failure.status = res.status
+          throw failure
         }
-      } catch (e: any) {
-        showErr('直播源同步失败：' + (e?.message ?? String(e)))
+        const body = await res.json()
+        return { revision: Number(body.revision) }
+      } finally {
+        window.clearTimeout(timeout)
+      }
+    }
+
+    async function checkOverlayStatus() {
+      if (!gameId || expectedOverlayRevision < 1 || publishInFlight || publishError) return
+      const token = localStorage.getItem(TOKEN_KEY)
+      if (!token) return
+      try {
+        const res = await fetch(`${base}api/games/${encodeURIComponent(gameId)}/live-ack?sourceId=${OVERLAY_SOURCE_ID}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          cache: 'no-store',
+        })
+        if (!res.ok) return
+        const body = await res.json()
+        const ackRevision = Number(body?.data?.revision ?? 0)
+        const ageSeconds = Number(body?.data?.ageSeconds ?? Infinity)
+        if (ackRevision >= expectedOverlayRevision && ageSeconds <= 6) {
+          showSync(`直播源已应用 revision ${ackRevision}（${Math.max(0, ageSeconds)} 秒前确认）`, 'ok')
+        } else if (ageSeconds > 6) {
+          showSync(`服务器 revision ${expectedOverlayRevision} 已保存，但直播源心跳中断`, 'error')
+        } else {
+          showSync(`服务器 revision ${expectedOverlayRevision} 已保存，直播源仍在 revision ${ackRevision}`, 'waiting')
+        }
+      } catch {
+        showSync(`服务器 revision ${expectedOverlayRevision} 已保存，暂时无法读取直播源确认`, 'error')
       }
     }
 
@@ -364,7 +501,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       const current = stateOf(rep)
       const scores = current.scores
       const dealer = dealerSeat(current.round)
-      const overlayUrl = `${location.origin}${base}live-overlay/?id=${encodeURIComponent(gameId!)}`
+      const overlayUrl = `${location.origin}${base}live-overlay/?id=${encodeURIComponent(gameId!)}&source=${OVERLAY_SOURCE_ID}`
 
       root.innerHTML = ''
       const top = el('div', 'live-panel')

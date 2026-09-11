@@ -6,7 +6,10 @@
 // @ts-nocheck - intentionally untyped: wrangler/esbuild strips types and D1
 // type declarations are not needed in the Astro tsconfig.
 
-const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' }
+const JSON_HEADERS = {
+  'Content-Type': 'application/json; charset=utf-8',
+  'Cache-Control': 'no-store, no-cache, must-revalidate',
+}
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS })
@@ -325,11 +328,11 @@ async function listRounds(env, request, gameId) {
 async function getLiveState(env, gameId) {
   const game = await getGameRow(env, gameId)
   if (!game) return error('game not found', 404)
-  const row = await env.DB.prepare('select state, updated_at from live_states where game_id = ?1')
+  const row = await env.DB.prepare('select state, revision, updated_at from live_states where game_id = ?1')
     .bind(gameId)
     .first()
-  if (!row) return json({ data: null })
-  return json({ data: parseJson(row.state, null), updated_at: row.updated_at })
+  if (!row) return json({ data: null, revision: 0 })
+  return json({ data: parseJson(row.state, null), revision: Number(row.revision), updated_at: row.updated_at })
 }
 
 async function updateLiveState(env, request, gameId) {
@@ -342,16 +345,84 @@ async function updateLiveState(env, request, gameId) {
 
   const body = await readBody(request)
   const state = body.state ?? body
+  const baseRevision = Number(body.baseRevision)
   if (!state || typeof state !== 'object') return error('state is required')
   if (String(state.gameId ?? gameId) !== gameId) return error('state gameId mismatch')
+  if (!Number.isInteger(baseRevision) || baseRevision < 0) return error('baseRevision must be a non-negative integer')
+
+  let saved = null
+  if (baseRevision === 0) {
+    saved = await env.DB.prepare(
+      `insert into live_states (game_id, state, revision, updated_at)
+       values (?1, ?2, 1, datetime('now'))
+       on conflict(game_id) do nothing
+       returning revision, updated_at`,
+    )
+      .bind(gameId, toJson(state))
+      .first()
+    if (saved) await env.DB.prepare('delete from live_source_acks where game_id = ?1').bind(gameId).run()
+  } else {
+    saved = await env.DB.prepare(
+      `update live_states
+       set state = ?2, revision = revision + 1, updated_at = datetime('now')
+       where game_id = ?1 and revision = ?3
+       returning revision, updated_at`,
+    )
+      .bind(gameId, toJson(state), baseRevision)
+      .first()
+  }
+
+  if (!saved) {
+    const current = await env.DB.prepare('select state, revision, updated_at from live_states where game_id = ?1').bind(gameId).first()
+    const currentState = parseJson(current?.state, null)
+    if (state.publishId && currentState?.publishId === state.publishId) {
+      return json({ ok: true, revision: Number(current.revision), updated_at: current.updated_at, duplicate: true })
+    }
+    return json({ error: { message: 'live state conflict', currentRevision: Number(current?.revision ?? 0) } }, 409)
+  }
+  return json({ ok: true, revision: Number(saved.revision), updated_at: saved.updated_at })
+}
+
+async function acknowledgeLiveState(env, request, gameId) {
+  const game = await getGameRow(env, gameId)
+  if (!game) return error('game not found', 404)
+  const body = await readBody(request)
+  const sourceId = String(body.sourceId ?? 'main')
+  const revision = Number(body.revision)
+  if (!/^[a-zA-Z0-9_-]{1,40}$/.test(sourceId)) return error('invalid sourceId')
+  if (!Number.isInteger(revision) || revision < 1) return error('invalid revision')
+  const current = await env.DB.prepare('select revision from live_states where game_id = ?1').bind(gameId).first()
+  if (!current || revision > Number(current.revision)) return error('unknown revision', 409)
   await env.DB.prepare(
-    `insert into live_states (game_id, state, updated_at)
-     values (?1, ?2, datetime('now'))
-     on conflict(game_id) do update set state = excluded.state, updated_at = excluded.updated_at`,
+    `insert into live_source_acks (game_id, source_id, revision, last_seen_at)
+     values (?1, ?2, ?3, datetime('now'))
+     on conflict(game_id, source_id) do update
+     set revision = max(live_source_acks.revision, excluded.revision), last_seen_at = excluded.last_seen_at`,
   )
-    .bind(gameId, toJson(state))
+    .bind(gameId, sourceId, revision)
     .run()
   return json({ ok: true })
+}
+
+async function getLiveAcknowledgement(env, request, gameId) {
+  const { response } = await requireRole(env, request, ['admin', 'referee'])
+  if (response) return response
+  const sourceId = new URL(request.url).searchParams.get('sourceId') ?? 'main'
+  if (!/^[a-zA-Z0-9_-]{1,40}$/.test(sourceId)) return error('invalid sourceId')
+  const row = await env.DB.prepare(
+    `select revision, last_seen_at,
+            max(0, unixepoch('now') - unixepoch(last_seen_at)) as age_seconds
+     from live_source_acks where game_id = ?1 and source_id = ?2`,
+  )
+    .bind(gameId, sourceId)
+    .first()
+  return json({
+    data: row ? {
+      revision: Number(row.revision),
+      lastSeenAt: row.last_seen_at,
+      ageSeconds: Number(row.age_seconds),
+    } : null,
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -897,6 +968,7 @@ async function finishGame(env, request, gameId) {
     env.DB.prepare("update games set seats = ?1, status = 'finished' where id = ?2")
       .bind(toJson(newSeats), gameId),
     env.DB.prepare('delete from live_states where game_id = ?1').bind(gameId),
+    env.DB.prepare('delete from live_source_acks where game_id = ?1').bind(gameId),
   ])
   return json({ data: newSeats })
 }
@@ -966,6 +1038,10 @@ export async function onRequest(context) {
       if (parts[2] === 'live-state') {
         if (method === 'GET') return getLiveState(env, gameId)
         if (method === 'PUT') return updateLiveState(env, request, gameId)
+      }
+      if (parts[2] === 'live-ack') {
+        if (method === 'GET') return getLiveAcknowledgement(env, request, gameId)
+        if (method === 'POST') return acknowledgeLiveState(env, request, gameId)
       }
       if (parts[2] === 'rounds') {
         if (method === 'GET') return listRounds(env, request, gameId)

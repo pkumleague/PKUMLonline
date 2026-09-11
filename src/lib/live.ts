@@ -34,6 +34,10 @@ export interface LiveState {
   liveOnly: LiveOnlyData
   /** 一次性的赛后总结放送信号；不参与逐局 JSON 导出。 */
   summary?: { id: string }
+  /** 客户端生成的幂等键，用于安全重试同一次放送。 */
+  publishId?: string
+  /** 本机草稿所基于的服务器版本；不用于叠加页排序。 */
+  baseRevision?: number
   updatedAt: string
 }
 
