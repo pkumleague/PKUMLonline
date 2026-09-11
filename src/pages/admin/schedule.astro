@@ -38,8 +38,14 @@ import StageTabs from '../../components/StageTabs.astro'
     <p id="game-err" class="admin-err"></p>
     <StageTabs stages={[{ name: '赛程' }, { name: '赛果' }]} />
     <section id="stage-0" class="stage-panel active">
+      <div class="data-export-bar">
+        <button type="button" id="schedule-export-toggle">导出数据</button>
+        <button type="button" id="schedule-export-download" hidden disabled>统一导出</button>
+        <button type="button" id="schedule-export-cancel" hidden>退出导出</button>
+        <span id="schedule-export-count" hidden>已选择 0 项</span>
+      </div>
       <table class="ann-table">
-        <thead><tr><th>日期</th><th>阶段</th><th>半庄</th><th>对阵</th><th>操作</th></tr></thead>
+        <thead><tr><th id="schedule-export-head" hidden>选择</th><th>日期</th><th>阶段</th><th>半庄</th><th>对阵</th><th>操作</th></tr></thead>
         <tbody id="game-list-up"></tbody>
       </table>
       <div id="fill-panel"></div>
@@ -71,8 +77,14 @@ import StageTabs from '../../components/StageTabs.astro'
       </table>
     </section>
     <section id="stage-1" class="stage-panel">
+      <div class="data-export-bar">
+        <button type="button" id="result-export-toggle">导出数据</button>
+        <button type="button" id="result-export-download" hidden disabled>统一导出</button>
+        <button type="button" id="result-export-cancel" hidden>退出导出</button>
+        <span id="result-export-count" hidden>已选择 0 项</span>
+      </div>
       <table class="ann-table">
-        <thead><tr><th>日期</th><th>阶段</th><th>半庄</th><th>对阵</th><th>操作</th></tr></thead>
+        <thead><tr><th id="result-export-head" hidden>选择</th><th>日期</th><th>阶段</th><th>半庄</th><th>对阵</th><th>操作</th></tr></thead>
         <tbody id="game-list-fin"></tbody>
       </table>
     </section>
@@ -94,9 +106,16 @@ import StageTabs from '../../components/StageTabs.astro'
     .fill-actions { display: flex; gap: 10px; margin-top: 12px; }
     .fill-actions button { padding: 10px 20px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); cursor: pointer; font-size: 18px; }
     .fill-actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .data-export-bar { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; }
+    .data-export-bar button { padding: 8px 14px; cursor: pointer; }
+    .data-export-bar button[hidden], .data-export-bar span[hidden] { display: none; }
+    .data-export-bar span { color: var(--muted); }
+    .export-choice { width: 58px; text-align: center; }
+    .export-choice input { width: 18px; height: 18px; cursor: pointer; }
   </style>
   <script>
     import { supabase } from '../../lib/supabase'
+    import { buildResultExport, buildScheduleExport } from '../../lib/adminDataExport'
     import { buildSeats } from '../../lib/games'
     import { compareUpcoming, compareFinished } from '../../lib/schedule'
     import teamsRaw from '../../../data/teams.json'
@@ -118,6 +137,16 @@ import StageTabs from '../../components/StageTabs.astro'
     const draftBar = document.getElementById('schedule-draft-bar')!
     const draftStatus = document.getElementById('schedule-draft-status')!
     const publishBtn = document.getElementById('schedule-publish') as HTMLButtonElement
+    const scheduleExportToggle = document.getElementById('schedule-export-toggle') as HTMLButtonElement
+    const scheduleExportDownload = document.getElementById('schedule-export-download') as HTMLButtonElement
+    const scheduleExportCancel = document.getElementById('schedule-export-cancel') as HTMLButtonElement
+    const scheduleExportCount = document.getElementById('schedule-export-count')!
+    const scheduleExportHead = document.getElementById('schedule-export-head')!
+    const resultExportToggle = document.getElementById('result-export-toggle') as HTMLButtonElement
+    const resultExportDownload = document.getElementById('result-export-download') as HTMLButtonElement
+    const resultExportCancel = document.getElementById('result-export-cancel') as HTMLButtonElement
+    const resultExportCount = document.getElementById('result-export-count')!
+    const resultExportHead = document.getElementById('result-export-head')!
     const base = import.meta.env.BASE_URL
     const TOKEN_KEY = 'pkuml_session_token'
     let editingId: string | null = null
@@ -132,6 +161,10 @@ import StageTabs from '../../components/StageTabs.astro'
     let publishingScheduleDraft = false
     let fillGame: any = null
     let fillSelects: HTMLSelectElement[] = []
+    let scheduleExportMode = false
+    let resultExportMode = false
+    const selectedScheduleIds = new Set<string>()
+    const selectedResultIds = new Set<string>()
     // 赛季__队伍名 -> roster
     const rosters = new Map<string, string[]>()
     const teamColorOf = (name: string) => teamsRaw.teams.find((t: any) => t.name === name)?.color ?? '#9ca3af'
@@ -161,6 +194,24 @@ import StageTabs from '../../components/StageTabs.astro'
       renderRows(upList, upcoming, '暂无赛程。')
       renderRows(finList, finished, '暂无赛果。')
       renderUnarrangedRows()
+    }
+
+    function updateExportControls() {
+      scheduleExportToggle.hidden = scheduleExportMode
+      scheduleExportDownload.hidden = !scheduleExportMode
+      scheduleExportCancel.hidden = !scheduleExportMode
+      scheduleExportCount.hidden = !scheduleExportMode
+      scheduleExportHead.hidden = !scheduleExportMode
+      scheduleExportDownload.disabled = selectedScheduleIds.size === 0
+      scheduleExportCount.textContent = `已选择 ${selectedScheduleIds.size} 项`
+
+      resultExportToggle.hidden = resultExportMode
+      resultExportDownload.hidden = !resultExportMode
+      resultExportCancel.hidden = !resultExportMode
+      resultExportCount.hidden = !resultExportMode
+      resultExportHead.hidden = !resultExportMode
+      resultExportDownload.disabled = selectedResultIds.size === 0
+      resultExportCount.textContent = `已选择 ${selectedResultIds.size} 项`
     }
 
     async function saveScheduleDraft() {
@@ -241,10 +292,13 @@ import StageTabs from '../../components/StageTabs.astro'
 
     function renderRows(tbody: HTMLElement, games: any[], emptyText: string) {
       tbody.innerHTML = ''
+      const isScheduleList = tbody === upList
+      const exportMode = isScheduleList ? scheduleExportMode : resultExportMode
+      const selectedIds = isScheduleList ? selectedScheduleIds : selectedResultIds
       if (games.length === 0) {
         const tr = document.createElement('tr')
         const td = document.createElement('td')
-        td.colSpan = 5
+        td.colSpan = exportMode ? 6 : 5
         td.textContent = emptyText
         td.style.color = 'var(--muted)'
         tr.appendChild(td)
@@ -254,6 +308,21 @@ import StageTabs from '../../components/StageTabs.astro'
       for (const g of games) {
         const tr = document.createElement('tr')
         const td = (s: string) => { const x = document.createElement('td'); x.textContent = s; tr.appendChild(x) }
+        if (exportMode) {
+          const choice = document.createElement('td')
+          choice.className = 'export-choice'
+          const checkbox = document.createElement('input')
+          checkbox.type = 'checkbox'
+          checkbox.checked = selectedIds.has(g.id)
+          checkbox.setAttribute('aria-label', `选择${g.date ?? ''}${g.round ?? ''}`)
+          checkbox.addEventListener('change', () => {
+            if (checkbox.checked) selectedIds.add(g.id)
+            else selectedIds.delete(g.id)
+            updateExportControls()
+          })
+          choice.appendChild(checkbox)
+          tr.appendChild(choice)
+        }
         td(g.date); td(g.stage); td(g.round ?? '')
         td((g.seats ?? []).map((s: { team: string }) => s.team).join(' / '))
         const ops = document.createElement('td')
@@ -613,6 +682,65 @@ import StageTabs from '../../components/StageTabs.astro'
         // The browser is already leaving; the next admin visit can still discard a stale draft.
       }
     }
+
+    function downloadJson(payload: unknown, filename: string) {
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+    }
+
+    function beginScheduleExport() {
+      selectedScheduleIds.clear()
+      scheduleExportMode = true
+      updateExportControls()
+      renderScheduleRows()
+    }
+
+    function cancelScheduleExport() {
+      selectedScheduleIds.clear()
+      scheduleExportMode = false
+      updateExportControls()
+      renderScheduleRows()
+    }
+
+    function beginResultExport() {
+      selectedResultIds.clear()
+      resultExportMode = true
+      updateExportControls()
+      renderScheduleRows()
+    }
+
+    function cancelResultExport() {
+      selectedResultIds.clear()
+      resultExportMode = false
+      updateExportControls()
+      renderScheduleRows()
+    }
+
+    scheduleExportToggle.addEventListener('click', beginScheduleExport)
+    scheduleExportCancel.addEventListener('click', cancelScheduleExport)
+    scheduleExportDownload.addEventListener('click', () => {
+      const games = gamesCache
+        .filter((game: any) => game.status === 'upcoming' && selectedScheduleIds.has(game.id))
+        .sort(compareUpcoming)
+      if (games.length === 0) return
+      downloadJson(buildScheduleExport(games), `赛程数据-${new Date().toISOString().slice(0, 10)}.json`)
+    })
+    resultExportToggle.addEventListener('click', beginResultExport)
+    resultExportCancel.addEventListener('click', cancelResultExport)
+    resultExportDownload.addEventListener('click', () => {
+      const games = gamesCache
+        .filter((game: any) => game.status === 'finished' && selectedResultIds.has(game.id))
+        .sort(compareFinished)
+      if (games.length === 0) return
+      downloadJson(buildResultExport(games), `赛果数据-${new Date().toISOString().slice(0, 10)}.json`)
+    })
     window.addEventListener('beforeunload', (event) => {
       if (!hasScheduleDraft || publishingScheduleDraft) return
       event.preventDefault()
