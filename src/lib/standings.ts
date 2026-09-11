@@ -24,6 +24,11 @@ export function formatScore(n: number | null): string {
   return Number.isInteger(n) ? String(n) : n.toFixed(1)
 }
 
+export function formatPt(n: number | null): string {
+  if (n == null) return '-'
+  return n.toFixed(1)
+}
+
 export function round1(x: number): number {
   return Math.round(x * 10) / 10
 }

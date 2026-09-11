@@ -40,7 +40,7 @@ import AdminShell from '../../components/admin/AdminShell.astro'
     import rosterRaw from '../../../data/current_roster.json'
     import { mapDbGame } from '../../lib/renderSchedule'
     import { aggregatePlayerBoard, aggregateTeamBoard, carryFrom, stageTeamTotals } from '../../lib/aggregate'
-    import { computePlayerBoard, computeTeamBoard, formatPct, formatScore } from '../../lib/standings'
+    import { computePlayerBoard, computeTeamBoard, formatPct, formatPt, formatScore } from '../../lib/standings'
     import { activeStageFromGames, standingsAsOf } from '../../lib/renderStandings'
 
     const teamNames = teams.teams.map((team) => team.name)
@@ -64,11 +64,11 @@ import AdminShell from '../../components/admin/AdminShell.astro'
     }
 
     function signed(value: number | null) {
-      return value == null ? '-' : value > 0 ? `+${formatScore(value)}` : formatScore(value)
+      return value == null ? '-' : value > 0 ? `+${formatPt(value)}` : formatPt(value)
     }
 
     function emptyZero(value: number | null) {
-      return value == null || value === 0 ? '' : formatScore(value)
+      return value == null || value === 0 ? '' : formatPt(value)
     }
 
     function teamColor(name: string) {
@@ -250,8 +250,8 @@ import AdminShell from '../../components/admin/AdminShell.astro'
       const rows = teamRows.map((row) => ({
         team: row.team,
         values: regular
-          ? [String(row.rank), row.team, formatScore(row.points), formatScore(row.stageRaw), row.diff == null ? '-' : String(row.diff), signed(row.advDiff), `${row.games}/${stage.totalGames}`, String(row.wins['1']), String(row.wins['2']), String(row.wins['3']), String(row.wins['4'])]
-          : [String(row.rank), row.team, formatScore(row.points), formatScore(row.stagePoints), formatScore(row.carry), row.diff == null ? '-' : String(row.diff), signed(stage.name === '决赛' ? row.firstDiff : row.advDiff), `${row.games}/${stage.totalGames}`, String(row.wins['1']), String(row.wins['2']), String(row.wins['3']), String(row.wins['4'])],
+          ? [String(row.rank), row.team, formatPt(row.points), formatPt(row.stageRaw), formatPt(row.diff), signed(row.advDiff), `${row.games}/${stage.totalGames}`, String(row.wins['1']), String(row.wins['2']), String(row.wins['3']), String(row.wins['4'])]
+          : [String(row.rank), row.team, formatPt(row.points), formatPt(row.stagePoints), formatPt(row.carry), formatPt(row.diff), signed(stage.name === '决赛' ? row.firstDiff : row.advDiff), `${row.games}/${stage.totalGames}`, String(row.wins['1']), String(row.wins['2']), String(row.wins['3']), String(row.wins['4'])],
       }))
       const dataUrl = drawBoard({
         kind: 'team',

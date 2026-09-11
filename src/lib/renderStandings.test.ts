@@ -61,6 +61,8 @@ describe('renderTeamTable', () => {
     expect(html).toContain('<span class="pts-label">pts</span>')
     expect(html).toContain('class="table-wrap team-table stage-常规赛"')
     expect(html).toContain('<span class="games-num">3</span><span class="games-total">/24</span>')
+    expect(html).toContain('<span class="pts-val">100.0</span>')
+    expect(html).toContain('<td class="num raw">50.0</td>')
   })
   it('半决赛表头含 半决赛积分/持越，无素点列', () => {
     const html = renderTeamTable('半决赛', [teamRow({ rank: 1 })], teams, 4)
@@ -81,9 +83,13 @@ describe('renderPlayerTable', () => {
     expect(html).toContain('data-href="/PKUMLonline/archive#player-Art3mis"')
   })
   it('负分带 neg，比率按百分比格式化', () => {
-    const html = renderPlayerTable([playerRow({ points: -88, winRate: 0.5 })], teams, '/')
+    const html = renderPlayerTable([playerRow({ points: -88, rawPoints: 24, penalty: -5, winRate: 0.5 })], teams, '/')
     expect(html).toContain('class="neg"')
+    expect(html).toContain('>-88.0</span>')
+    expect(html).toContain('<td class="num raw">24.0</td>')
+    expect(html).toContain('<span class="penalty">-5.0</span>')
     expect(html).toContain('50.0%')
+    expect(html).toContain('<td class="num">42000</td>')
   })
   it('队伍列带底色与深浅字', () => {
     const html = renderPlayerTable([playerRow({ team: '雷电' })], teams, '/')

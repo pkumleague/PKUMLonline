@@ -1,4 +1,4 @@
-import { formatPct, formatScore } from './standings'
+import { formatPct, formatPt, formatScore } from './standings'
 import type { ComputedPlayerRow, ComputedTeamRow } from './standings'
 import type { TeamInfo, Wins } from './types'
 
@@ -51,8 +51,8 @@ function teamNameHtml(name: string): string {
 }
 
 const sumWins = (w: Wins) => w['1'] + w['2'] + w['3'] + w['4']
-const fmt = (n: number | null) => (n == null ? '-' : String(n))
-const fmtSigned = (n: number | null) => (n == null ? '-' : n > 0 ? `+${n}` : String(n))
+const fmt = (n: number | null) => formatPt(n)
+const fmtSigned = (n: number | null) => (n == null ? '-' : n > 0 ? `+${formatPt(n)}` : formatPt(n))
 
 export function renderTeamTable(
   stage: string,
@@ -79,11 +79,11 @@ export function renderTeamTable(
       cells.push(`<td class="${rankClass(stage, r.rank)}">${r.rank}</td>`)
       cells.push(`<td class="team-col" style="${teamStyle(r.team, teams)}">${teamNameHtml(r.team)}</td>`)
       cells.push(
-        `<td class="num col-pts"><span class="pts-val${neg}">${formatScore(r.points)}</span><span class="pts-label">pts</span></td>`,
+        `<td class="num col-pts"><span class="pts-val${neg}">${formatPt(r.points)}</span><span class="pts-label">pts</span></td>`,
       )
-      if (stage !== '常规赛') cells.push(`<td class="num">${formatScore(r.stagePoints)}</td>`)
-      if (stage !== '常规赛') cells.push(`<td class="num">${formatScore(r.carry)}</td>`)
-      if (stage === '常规赛') cells.push(`<td class="num raw">${formatScore(r.stageRaw)}</td>`)
+      if (stage !== '常规赛') cells.push(`<td class="num">${formatPt(r.stagePoints)}</td>`)
+      if (stage !== '常规赛') cells.push(`<td class="num">${formatPt(r.carry)}</td>`)
+      if (stage === '常规赛') cells.push(`<td class="num raw">${formatPt(r.stageRaw)}</td>`)
       cells.push(`<td class="num col-diff">${fmt(r.diff)}</td>`)
       cells.push(
         stage === '决赛'
@@ -103,7 +103,7 @@ export function renderTeamTable(
   return `<div class="table-wrap team-table stage-${stage}"><table><thead><tr>${thead}</tr></thead><tbody>${body}</tbody></table></div>`
 }
 
-const num0 = (n: number | null | undefined) => (n == null || n === 0 ? '' : formatScore(n))
+const num0 = (n: number | null | undefined) => (n == null || n === 0 ? '' : formatPt(n))
 const win0 = (n: number) => (n === 0 ? '' : String(n))
 const pct0 = (n: number | null | undefined) => (n == null || n === 0 ? '' : formatPct(n))
 
@@ -122,10 +122,10 @@ export function renderPlayerTable(rows: ComputedPlayerRow[], teams: TeamInfo[], 
       cells.push(`<td class="team-col" style="${teamStyle(r.team, teams)}">${esc(r.team)}</td>`)
       cells.push(`<td>${esc(r.name)}</td>`)
       cells.push(
-        `<td class="num col-pts-p">${r.points < 0 ? `<span class="neg">${formatScore(r.points)}</span>` : num0(r.points)}</td>`,
+        `<td class="num col-pts-p">${r.points < 0 ? `<span class="neg">${formatPt(r.points)}</span>` : num0(r.points)}</td>`,
       )
       cells.push(`<td class="num raw">${num0(r.rawPoints)}</td>`)
-      cells.push(`<td class="num">${r.penalty ? `<span class="penalty">${r.penalty}</span>` : ''}</td>`)
+      cells.push(`<td class="num">${r.penalty ? `<span class="penalty">${formatPt(r.penalty)}</span>` : ''}</td>`)
       cells.push(`<td class="num">${win0(r.games)}</td>`)
       cells.push(`<td class="num col-avg">${r.avgRank == null ? '' : r.avgRank.toFixed(2)}</td>`)
       cells.push(`<td class="num col-w">${win0(r.wins['1'])}</td>`)

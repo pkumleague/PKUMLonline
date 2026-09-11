@@ -97,7 +97,7 @@ const active = 0
     import rosterRaw from '../../data/current_roster.json'
     import { mapDbGame } from '../lib/renderSchedule'
     import { aggregateTeamBoard, aggregatePlayerBoard } from '../lib/aggregate'
-    import { computeTeamBoard, computePlayerBoard, formatScore, formatPct } from '../lib/standings'
+    import { computeTeamBoard, computePlayerBoard, formatPt, formatScore, formatPct } from '../lib/standings'
 
     const teamNames = teams.teams.map((t) => t.name)
     const rosterPairs: { team: string; name: string }[] = []
@@ -129,7 +129,8 @@ const active = 0
       const finalBoard = boardOf(finalGames)
       const byName = (board: ReturnType<typeof computePlayerBoard>, name: string) => board.find((r) => r.name === name)
 
-      const fmt = (n: number | null | undefined) => (n == null ? '-' : formatScore(n))
+      const fmtPt = (n: number | null | undefined) => (n == null ? '-' : formatPt(n))
+      const fmtScore = (n: number | null | undefined) => (n == null ? '-' : formatScore(n))
       const pct = (n: number | null | undefined) => (n == null ? '-' : formatPct(n))
 
       const totalFinished = regGames.length + semiGames.length + finalGames.length
@@ -158,10 +159,10 @@ const active = 0
         const semiR = byName(semiBoard, name)
         const finR = byName(finalBoard, name)
         set(
-          fmt(r.points),
-          semiGames.length > 0 && semiR && semiR.games > 0 ? fmt(semiR.points) : '-',
-          finalGames.length > 0 && finR && finR.games > 0 ? fmt(finR.points) : '-',
-          r.maxScore != null && r.maxScore !== 0 ? fmt(r.maxScore) : '-',
+          fmtPt(r.points),
+          semiGames.length > 0 && semiR && semiR.games > 0 ? fmtPt(semiR.points) : '-',
+          finalGames.length > 0 && finR && finR.games > 0 ? fmtPt(finR.points) : '-',
+          r.maxScore != null && r.maxScore !== 0 ? fmtScore(r.maxScore) : '-',
           pct(r.avoidRate),
           String(teamRank.get(row.dataset.team ?? '') ?? '-'),
         )

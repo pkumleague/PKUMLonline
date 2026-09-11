@@ -55,7 +55,7 @@ const base = import.meta.env.BASE_URL
 
     <script>
       import teamsRaw from '../../data/teams.json'
-      import { dealerSeat } from '../lib/scoring'
+      import { dealerSeat, seatWindFromDealer } from '../lib/scoring'
       import { replayGame } from '../lib/replay'
       import { rawScoreOf, rankPointsForScores } from '../lib/aggregate'
       import { liveStorageKey, tileImageSrc, tileLabel } from '../lib/live'
@@ -196,7 +196,7 @@ const base = import.meta.env.BASE_URL
         })
       }
 
-      function createPlayerCard(seat, index, score) {
+      function createPlayerCard(seat, index, score, dealer) {
         const team = seat?.team ?? ''
         const player = seat?.player ?? seat?.name ?? ''
         const card = document.createElement('article')
@@ -212,7 +212,7 @@ const base = import.meta.env.BASE_URL
         const portrait = document.createElement('div')
         portrait.className = 'portrait-chip'
         const seatLabel = document.createElement('span')
-        seatLabel.textContent = traditionalSeat(seat?.seat ?? ['东', '南', '西', '北'][index])
+        seatLabel.textContent = traditionalSeat(seatWindFromDealer(index, dealer))
         const teamLabel = document.createElement('small')
         teamLabel.textContent = team
         portrait.append(seatLabel, teamLabel)
@@ -241,13 +241,14 @@ const base = import.meta.env.BASE_URL
           const key = playerCardKey(seat, i)
           let card = board.children[i]
           if (!card || playerCardKeys[i] !== key) {
-            const replacement = createPlayerCard(seat, i, renderScores[i] ?? 25000)
+            const replacement = createPlayerCard(seat, i, renderScores[i] ?? 25000, dealer)
             if (card) board.replaceChild(replacement, card)
             else board.appendChild(replacement)
             card = replacement
             playerCardKeys[i] = key
           }
           card.classList.toggle('dealer', i === dealer)
+          setCardSeat(card, i, dealer)
           const scoreLabel = card.querySelector('.score')
           if (scoreLabel) {
             scoreLabel.dataset.score = String(Number(scores[i] ?? 25000))
@@ -280,7 +281,13 @@ const base = import.meta.env.BASE_URL
         displayedDealer = dealer
         ;[...board.querySelectorAll('.player-lower')].forEach((card, i) => {
           card.classList.toggle('dealer', i === dealer)
+          setCardSeat(card, i, dealer)
         })
+      }
+
+      function setCardSeat(card, index, dealer) {
+        const seat = card.querySelector('.portrait-chip > span')
+        if (seat) seat.textContent = traditionalSeat(seatWindFromDealer(index, dealer))
       }
 
       function maybePlaySummary(state, rep) {

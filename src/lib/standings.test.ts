@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { avgRank, rate, formatPct, formatScore, computeTeamBoard, computePlayerBoard, activeStageName } from './standings'
+import { avgRank, rate, formatPct, formatPt, formatScore, computeTeamBoard, computePlayerBoard, activeStageName } from './standings'
 import type { PlayerBoardRow, StageStandings, TeamBoardRow } from './types'
 
 describe('avgRank', () => {
@@ -39,6 +39,18 @@ describe('formatScore', () => {
   })
   it('null 显示 -', () => {
     expect(formatScore(null)).toBe('-')
+  })
+})
+
+describe('formatPt', () => {
+  it('整数固定保留一位小数', () => {
+    expect(formatPt(24)).toBe('24.0')
+  })
+  it('小数保留一位', () => {
+    expect(formatPt(-89.3)).toBe('-89.3')
+  })
+  it('null 显示 -', () => {
+    expect(formatPt(null)).toBe('-')
   })
 })
 

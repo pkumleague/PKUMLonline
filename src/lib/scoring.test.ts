@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { dealerSeat, isRenchan, nextRound, honbaFeeOf, settleRound } from './scoring'
+import { currentSeatWind, dealerSeat, isRenchan, nextRound, honbaFeeOf, settleRound } from './scoring'
 import type { RoundResult, RoundState } from './scoring'
 
 const r = (over: Partial<RoundState> = {}): RoundState => ({ wind: '东', number: 1, honba: 0, ...over })
@@ -13,6 +13,21 @@ describe('dealerSeat', () => {
     expect(dealerSeat(r({ wind: '东', number: 4 }))).toBe(3)
     expect(dealerSeat(r({ wind: '南', number: 1 }))).toBe(0)
     expect(dealerSeat(r({ wind: '南', number: 3 }))).toBe(2)
+  })
+})
+
+describe('currentSeatWind', () => {
+  it.each([
+    ['东', 1, ['东', '南', '西', '北']],
+    ['东', 2, ['北', '东', '南', '西']],
+    ['东', 3, ['西', '北', '东', '南']],
+    ['东', 4, ['南', '西', '北', '东']],
+    ['南', 1, ['东', '南', '西', '北']],
+    ['南', 2, ['北', '东', '南', '西']],
+    ['南', 3, ['西', '北', '东', '南']],
+    ['南', 4, ['南', '西', '北', '东']],
+  ] as const)('%s%d局显示当前风位', (wind, number, expected) => {
+    expect([0, 1, 2, 3].map((i) => currentSeatWind(r({ wind, number }), i))).toEqual(expected)
   })
 })
 

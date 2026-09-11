@@ -11,6 +11,7 @@
  */
 
 export type Wind = '东' | '南'
+export type SeatWind = '东' | '南' | '西' | '北'
 
 export interface RoundState {
   wind: Wind
@@ -46,6 +47,17 @@ export interface Settlement {
 /** 亲家座位：局名对应初始座位（东1/南1=东起，东2/南2=南起，…） */
 export function dealerSeat(round: RoundState): number {
   return round.number - 1
+}
+
+/** 当前局某位选手的风位；playerIndex 为半庄开始时的东南西北顺序。 */
+export function currentSeatWind(round: RoundState, playerIndex: number): SeatWind {
+  return seatWindFromDealer(playerIndex, dealerSeat(round))
+}
+
+/** 按当前亲家索引计算某位选手的风位，供直播 UI 与亲家标记同步。 */
+export function seatWindFromDealer(playerIndex: number, dealer: number): SeatWind {
+  const winds: SeatWind[] = ['东', '南', '西', '北']
+  return winds[(playerIndex - dealer + 4) % 4]
 }
 
 /** 是否为连庄（亲家和牌或亲家听牌流局） */

@@ -242,8 +242,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
         if (value == null) return
         input.value = value
         input.dispatchEvent(new Event('input', { bubbles: true }))
-        publish()
-        showErr('已放送到直播画面')
+        publishToOverlay()
       })
       pair.append(input, button)
       return pair
@@ -322,6 +321,12 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       localStorage.setItem(draftStorageKey(), JSON.stringify(state))
       localStorage.setItem(liveStorageKey(gameId), JSON.stringify(state))
       queueRemotePublish(state)
+    }
+
+    function publishToOverlay() {
+      if (!game) return
+      publish()
+      showErr('已放送到直播画面')
     }
 
     function queueRemotePublish(state: any) {
@@ -622,10 +627,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       const nextBtn = el('button', 'primary', '保存并下一局')
       nextBtn.addEventListener('click', saveAndNext)
       const publishBtn = el('button', '', '放送')
-      publishBtn.addEventListener('click', () => {
-        publish()
-        showErr('已放送到直播画面')
-      })
+      publishBtn.addEventListener('click', publishToOverlay)
       const exportBtn = el('button', '', '导出 JSON')
       exportBtn.addEventListener('click', exportJson)
       const clearBtn = el('button', 'danger', '清除全部直播录入')
@@ -1041,6 +1043,20 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       a.click()
       URL.revokeObjectURL(url)
     }
+
+    document.addEventListener('keydown', (event) => {
+      if (
+        event.key !== 'Enter' ||
+        event.repeat ||
+        event.isComposing ||
+        event.ctrlKey ||
+        event.altKey ||
+        event.metaKey ||
+        document.querySelector('.tile-picker-backdrop')
+      ) return
+      event.preventDefault()
+      publishToOverlay()
+    })
 
     load()
   </script>

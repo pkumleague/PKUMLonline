@@ -1,5 +1,5 @@
 ---
-import { formatScore, formatPct } from '../lib/standings'
+import { formatPt, formatScore, formatPct } from '../lib/standings'
 import { teamText } from '../lib/data'
 import type { PlayerRecord, TeamInfo } from '../lib/types'
 
@@ -54,9 +54,9 @@ const fmtPct = (n: number | null) => (n == null ? '-' : `${n.toFixed(2)}%`)
             <tr>
               <td class="num">{h.year}</td>
               <td class="team-col" style={h.team ? ts(h.team) : ''}>{h.team ?? '-'}</td>
-              <td class="num">{formatScore(h.regularPoints)}</td>
-              <td class="num">{formatScore(h.semifinalPoints)}</td>
-              <td class="num">{formatScore(h.finalPoints)}</td>
+              <td class="num">{formatPt(h.regularPoints)}</td>
+              <td class="num">{formatPt(h.semifinalPoints)}</td>
+              <td class="num">{formatPt(h.finalPoints)}</td>
               <td class="num">{formatScore(h.regularMaxScore)}</td>
               <td class="num">{fmtPct(h.regularAvoidRate)}</td>
               <td class="num">{h.teamRank ?? '-'}</td>

@@ -1,5 +1,5 @@
 ---
-import { formatScore } from '../lib/standings'
+import { formatPt } from '../lib/standings'
 import { teamText } from '../lib/data'
 import type { ComputedTeamRow } from '../lib/standings'
 import type { TeamInfo, Wins } from '../lib/types'
@@ -15,7 +15,7 @@ const { stage, rows, teams, totalGames } = Astro.props
 const colorOf = (name: string) => teams.find((t) => t.name === name)?.color ?? '#9ca3af'
 const ts = (name: string) => `background:${colorOf(name)};color:${teamText(name)}`
 const fmtName = (n: string) => /^[一-鿿]{2}$/.test(n) ? n[0] + ' ' + n[1] : n
-const fmt = (n: number | null) => (n == null ? '-' : String(n))
+const fmt = (n: number | null) => formatPt(n)
 const sum = (w: Wins) => w['1'] + w['2'] + w['3'] + w['4']
 
 const promoteRank = stage === '常规赛' ? 6 : stage === '半决赛' ? 4 : 0
@@ -61,12 +61,12 @@ const header = HEADERS[stage] ?? HEADERS['常规赛']
                 {/^[一-鿿]{2}$/.test(r.team) ? <>{r.team[0]}<span class="team-sep"> </span>{r.team[1]}</> : r.team}
               </td>
               <td class="num col-pts">
-                <span class={`pts-val${neg}`}>{formatScore(r.points)}</span>
+                <span class={`pts-val${neg}`}>{formatPt(r.points)}</span>
                 <span class="pts-label">pts</span>
               </td>
-              {stage !== '常规赛' && <td class="num">{formatScore(r.stagePoints)}</td>}
-              {stage !== '常规赛' && <td class="num">{formatScore(r.carry)}</td>}
-              {stage === '常规赛' && <td class="num raw">{formatScore(r.stageRaw)}</td>}
+              {stage !== '常规赛' && <td class="num">{formatPt(r.stagePoints)}</td>}
+              {stage !== '常规赛' && <td class="num">{formatPt(r.carry)}</td>}
+              {stage === '常规赛' && <td class="num raw">{formatPt(r.stageRaw)}</td>}
               <td class="num col-diff">{fmt(r.diff)}</td>
               {stage === '决赛'
                 ? <td class="num col-diff">{fmt(r.firstDiff)}</td>

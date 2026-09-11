@@ -1,5 +1,5 @@
 ---
-import { formatPct, formatScore } from '../lib/standings'
+import { formatPct, formatPt, formatScore } from '../lib/standings'
 import { teamText } from '../lib/data'
 import type { ComputedPlayerRow } from '../lib/standings'
 import type { TeamInfo } from '../lib/types'
@@ -13,7 +13,7 @@ const { rows, teams } = Astro.props
 const colorOf = (name: string) => teams.find((t) => t.name === name)?.color ?? '#9ca3af'
 const ts = (name: string) => `background:${colorOf(name)};color:${teamText(name)}`
 
-const num = (n: number | null) => (n == null || n === 0 ? '' : formatScore(n))
+const num = (n: number | null) => (n == null || n === 0 ? '' : formatPt(n))
 const win = (n: number) => (n === 0 ? '' : String(n))
 const pct = (n: number | null) => (n == null || n === 0 ? '' : formatPct(n))
 const base = import.meta.env.BASE_URL
@@ -34,9 +34,9 @@ const base = import.meta.env.BASE_URL
             <td class="rank col-rank-p">{r.rank}</td>
             <td class="team-col" style={ts(r.team)}>{r.team}</td>
             <td>{r.name}</td>
-            <td class="num col-pts-p">{r.points < 0 ? <span class="neg">{formatScore(r.points)}</span> : num(r.points)}</td>
+            <td class="num col-pts-p">{r.points < 0 ? <span class="neg">{formatPt(r.points)}</span> : num(r.points)}</td>
             <td class="num raw">{num(r.rawPoints)}</td>
-            <td class="num">{r.penalty ? <span class="penalty">{r.penalty}</span> : ''}</td>
+            <td class="num">{r.penalty ? <span class="penalty">{formatPt(r.penalty)}</span> : ''}</td>
             <td class="num">{win(r.games)}</td>
             <td class="num col-avg">{r.avgRank == null ? '' : r.avgRank.toFixed(2)}</td>
             <td class="num col-w">{win(r.wins['1'])}</td>
