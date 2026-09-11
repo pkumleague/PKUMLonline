@@ -46,8 +46,24 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
     .score-card .value { font-size: 28px; font-weight: 900; font-variant-numeric: tabular-nums; }
     .tile-preview { display: flex; gap: 5px; min-height: 46px; align-items: center; }
     .tile-preview img { width: 32px; height: 44px; object-fit: contain; }
-    .dora-inputs { display: flex; gap: 8px; align-items: center; }
+    .dora-inputs { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     .dora-inputs input[type='text'] { width: 58px; text-align: center; }
+    .input-picker-pair { display: inline-flex; gap: 2px; align-items: center; }
+    .tile-picker-open { padding: 7px 10px !important; white-space: nowrap; }
+    .tile-picker-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 24px; background: rgb(0 0 0 / 62%); }
+    .tile-picker-dialog { width: min(1080px, 100%); max-height: calc(100vh - 48px); overflow: auto; padding: 24px; border-radius: 14px; background: #f7f8fa; box-shadow: 0 24px 80px rgb(0 0 0 / 45%); }
+    .tile-picker-dialog h2 { margin: 0; font-size: 24px; }
+    .tile-picker-note { margin: 8px 0 18px; color: var(--muted); }
+    .tile-picker-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+    .tile-picker-actions button { padding: 9px 15px; border: 1px solid var(--line); border-radius: 7px; background: #fff; cursor: pointer; font-size: 16px; }
+    .tile-picker-actions .confirm { border-color: var(--accent); background: var(--accent); color: #fff; }
+    .tile-picker-actions .confirm:disabled { cursor: not-allowed; opacity: .45; }
+    .tile-picker-suit-row { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+    .tile-picker-suit-row strong { font-size: 16px; }
+    .tile-picker-tiles { display: flex; flex-wrap: wrap; gap: 8px; }
+    .tile-picker-tile { display: grid; place-items: center; box-sizing: border-box; width: 64px; height: 86px; padding: 4px; border: 4px solid transparent; border-radius: 8px; background: #fff; cursor: pointer; }
+    .tile-picker-tile img { width: 50px; height: 70px; object-fit: contain; }
+    .tile-picker-tile.is-selected { border-color: #177a37; background: #e8f6ec; box-shadow: 0 0 0 2px rgb(23 122 55 / 35%); }
     .points-grid { max-height: 310px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
     .points-grid table { width: 100%; border-collapse: collapse; font-size: 13px; }
     .points-grid th, .points-grid td { border-bottom: 1px solid var(--line); padding: 4px; text-align: center; white-space: nowrap; }
@@ -63,6 +79,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
     @media (max-width: 980px) {
       .live-grid { grid-template-columns: 1fr; }
       .score-strip { grid-template-columns: repeat(2, 1fr); }
+      .tile-picker-suit-row { grid-template-columns: 1fr; }
     }
   </style>
 
@@ -89,6 +106,13 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
 
     const FU = ['20', '25', '30', '40', '50', '60', '70']
     const HAN = ['1', '2', '3', '4']
+    const PICKER_TILE_ROWS = [
+      { label: '万子', codes: Array.from({ length: 9 }, (_, i) => `${i + 1}m`) },
+      { label: '筒子', codes: Array.from({ length: 9 }, (_, i) => `${i + 1}p`) },
+      { label: '索子', codes: Array.from({ length: 9 }, (_, i) => `${i + 1}s`) },
+      { label: '字牌', codes: Array.from({ length: 7 }, (_, i) => `${i + 1}z`) },
+    ]
+    const PICKER_TILE_ORDER = PICKER_TILE_ROWS.flatMap((row) => row.codes)
 
     let game: any = null
     let role: string | null = null
@@ -128,6 +152,101 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
       if (cls) node.className = cls
       if (text) node.textContent = text
       return node
+    }
+
+    function openTilePicker(mode: 'dora' | 'wait', initialCodes: string[] = []): Promise<string | null> {
+      return new Promise((resolve) => {
+        const backdrop = el('div', 'tile-picker-backdrop')
+        const dialog = el('section', 'tile-picker-dialog')
+        let selected = new Set(initialCodes.filter((code) => PICKER_TILE_ORDER.includes(code)))
+        const previousOverflow = document.body.style.overflow
+
+        const sortedSelection = () => [...selected].sort(
+          (a, b) => PICKER_TILE_ORDER.indexOf(a) - PICKER_TILE_ORDER.indexOf(b),
+        )
+        const confirmValue = () => mode === 'dora'
+          ? sortedSelection()[0] ?? null
+          : sortedSelection().join('') || null
+        const close = (value: string | null) => {
+          document.removeEventListener('keydown', onKeydown)
+          document.body.style.overflow = previousOverflow
+          backdrop.remove()
+          resolve(value)
+        }
+        const onKeydown = (event: KeyboardEvent) => {
+          if (event.key === 'Escape') close(null)
+        }
+        const selectTile = (code: string) => {
+          if (mode === 'dora') selected = new Set([code])
+          else if (selected.has(code)) selected.delete(code)
+          else selected.add(code)
+          renderPicker()
+        }
+        const renderPicker = () => {
+          dialog.innerHTML = ''
+          dialog.appendChild(el('h2', '', mode === 'dora' ? '选择宝牌' : '选择听牌'))
+          dialog.appendChild(el(
+            'p',
+            'tile-picker-note',
+            mode === 'dora' ? '一次只能选择一张普通麻将牌。' : '可选择多种听牌，重复点击会取消选择。',
+          ))
+          const rows = el('div', 'tile-picker-rows')
+          for (const row of PICKER_TILE_ROWS) {
+            const rowEl = el('div', 'tile-picker-suit-row')
+            rowEl.appendChild(el('strong', '', row.label))
+            const tileList = el('div', 'tile-picker-tiles')
+            for (const code of row.codes) {
+              const button = el('button', 'tile-picker-tile') as HTMLButtonElement
+              button.type = 'button'
+              button.classList.toggle('is-selected', selected.has(code))
+              const image = document.createElement('img')
+              image.src = tileImageSrc(code)
+              image.alt = tileLabel(code)
+              button.appendChild(image)
+              button.addEventListener('click', () => selectTile(code))
+              tileList.appendChild(button)
+            }
+            rowEl.appendChild(tileList)
+            rows.appendChild(rowEl)
+          }
+          dialog.appendChild(rows)
+          const actions = el('div', 'tile-picker-actions')
+          const cancel = el('button', 'cancel', '退出') as HTMLButtonElement
+          cancel.type = 'button'
+          cancel.addEventListener('click', () => close(null))
+          const confirm = el('button', 'confirm', '确认') as HTMLButtonElement
+          confirm.type = 'button'
+          confirm.disabled = !confirmValue()
+          confirm.addEventListener('click', () => close(confirmValue()))
+          actions.append(cancel, confirm)
+          dialog.appendChild(actions)
+        }
+
+        backdrop.addEventListener('click', (event) => {
+          if (event.target === backdrop) close(null)
+        })
+        backdrop.appendChild(dialog)
+        document.body.appendChild(backdrop)
+        document.body.style.overflow = 'hidden'
+        document.addEventListener('keydown', onKeydown)
+        renderPicker()
+      })
+    }
+
+    function inputPickerPair(input: HTMLInputElement, mode: 'dora' | 'wait') {
+      const pair = el('span', 'input-picker-pair')
+      const button = el('button', 'tile-picker-open', '选牌') as HTMLButtonElement
+      button.type = 'button'
+      button.addEventListener('click', async () => {
+        const value = await openTilePicker(mode, parseTileInput(input.value))
+        if (value == null) return
+        input.value = value
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+        publish()
+        showErr('已放送到直播画面')
+      })
+      pair.append(input, button)
+      return pair
     }
 
     async function load() {
@@ -298,7 +417,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
         input.value = currentDora[i] ?? ''
         input.maxLength = 3
         input.addEventListener('input', updateDora)
-        doraInputs.appendChild(input)
+        doraInputs.appendChild(inputPickerPair(input, 'dora'))
       }
       renderTilePreview(doraPreview, currentDora)
       doraRow.append(el('label', '', '宝牌'), doraInputs, doraPreview)
@@ -319,7 +438,7 @@ import AdminShell from '../../../components/admin/AdminShell.astro'
           saveDraftState()
         })
         const seat = game.seats?.[i]
-        row.append(el('label', '', `${seat?.seat ?? seatLabel(i)} ${seat?.player ?? ''}`), input, preview)
+        row.append(el('label', '', `${seat?.seat ?? seatLabel(i)} ${seat?.player ?? ''}`), inputPickerPair(input, 'wait'), preview)
         panel.appendChild(row)
       })
 
