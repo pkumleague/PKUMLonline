@@ -11,9 +11,289 @@ import AdminShell from '../../components/admin/AdminShell.astro'
       <li class="admin-only"><a href={`${import.meta.env.BASE_URL}admin/schedule/`}>赛程管理</a></li>
       <li><a href={`${import.meta.env.BASE_URL}teams/`}>队伍与选手（名单见 data/current_roster.json）</a></li>
     </ul>
+    <section class="export-panel admin-only">
+      <h2>积分榜图片导出</h2>
+      <p>按当前阶段的已完赛赛果生成图片；图片规则与前台积分榜一致。</p>
+      <div class="export-actions">
+        <button id="export-team-board">生成队伍积分表</button>
+        <button id="export-player-board">生成选手积分表</button>
+      </div>
+      <p id="export-status" class="export-status"></p>
+      <a id="export-download" class="export-download" hidden download>下载 PNG</a>
+      <img id="export-preview" class="export-preview" alt="积分榜图片预览" hidden />
+    </section>
   </AdminShell>
+  <style is:global>
+    .export-panel { margin-top: 24px; padding: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+    .export-panel h2 { margin: 0 0 8px; font-size: 20px; }
+    .export-panel p { color: var(--muted); }
+    .export-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+    .export-actions button, .export-download { padding: 8px 13px; border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: var(--text); cursor: pointer; font-size: 15px; }
+    .export-actions button { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .export-download { display: inline-block; margin-top: 10px; text-decoration: none; }
+    .export-preview { display: block; width: 100%; max-width: 960px; margin-top: 14px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+    .export-status { min-height: 1.4em; }
+  </style>
   <script>
     import { supabase } from '../../lib/supabase'
+    import { season, teams } from '../../lib/data'
+    import rosterRaw from '../../../data/current_roster.json'
+    import { mapDbGame } from '../../lib/renderSchedule'
+    import { aggregatePlayerBoard, aggregateTeamBoard, carryFrom, stageTeamTotals } from '../../lib/aggregate'
+    import { computePlayerBoard, computeTeamBoard, formatPct, formatScore } from '../../lib/standings'
+    import { activeStageFromGames, standingsAsOf } from '../../lib/renderStandings'
+
+    const teamNames = teams.teams.map((team) => team.name)
+    const rosterIndex = new Map<string, number>()
+    const rosterPairs: { team: string; name: string }[] = []
+    for (const team of rosterRaw.teams ?? []) {
+      team.roster.forEach((name, index) => {
+        rosterIndex.set(name, index)
+        rosterPairs.push({ team: team.name, name })
+      })
+    }
+
+    const exportStatus = document.getElementById('export-status')!
+    const exportPreview = document.getElementById('export-preview') as HTMLImageElement
+    const exportDownload = document.getElementById('export-download') as HTMLAnchorElement
+    const lightTeams = new Set(['樱花', '雷电', '赤坂', '凤凰', 'AB'])
+
+    const imageLayout = {
+      team: { width: 720, title: 42, header: 25, row: 25, footer: 28 },
+      player: { width: 1000, title: 42, header: 25, row: 25, footer: 28 },
+    }
+
+    function signed(value: number | null) {
+      return value == null ? '-' : value > 0 ? `+${formatScore(value)}` : formatScore(value)
+    }
+
+    function emptyZero(value: number | null) {
+      return value == null || value === 0 ? '' : formatScore(value)
+    }
+
+    function teamColor(name: string) {
+      return teams.teams.find((team) => team.name === name)?.color ?? '#9ca3af'
+    }
+
+    function rankCellStyle(stage: string, rank: number) {
+      if (stage === '常规赛') {
+        if (rank <= 4) return { background: '#eaf0f8', color: '#111' }
+        if (rank <= 6) return { background: '#fff3e6', color: '#111' }
+        return { background: '#ffffff', color: '#cc0000' }
+      }
+      if (stage === '半决赛') return rank <= 4
+        ? { background: '#eaf0f8', color: '#111' }
+        : { background: '#ffffff', color: '#cc0000' }
+      if (stage === '决赛' && rank === 1) return { background: '#fff3e6', color: '#111' }
+      return { background: '#dedede', color: '#111' }
+    }
+
+    function drawBoard(options: {
+      kind: 'team' | 'player'
+      stage?: string
+      title: string
+      subtitle: string
+      headers: string[]
+      widths: number[]
+      rows: { values: string[]; team?: string; nameIndex?: number }[]
+    }) {
+      const layout = imageLayout[options.kind]
+      const tableHeight = layout.header + options.rows.length * layout.row
+      const height = layout.title + tableHeight + layout.footer
+      const canvas = document.createElement('canvas')
+      const outputScale = 2
+      canvas.width = layout.width * outputScale
+      canvas.height = height * outputScale
+      const ctx = canvas.getContext('2d')!
+      ctx.scale(outputScale, outputScale)
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, layout.width, height)
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillStyle = '#1a1a1a'
+      ctx.font = '700 20px "方正大黑"'
+      ctx.fillText(options.title, layout.width / 2, layout.title / 2 + 3)
+
+      const xPositions = options.widths.reduce<number[]>((xs, width) => [...xs, xs[xs.length - 1] + width], [0])
+      ctx.fillStyle = '#f5f5f5'
+      ctx.fillRect(0, layout.title, layout.width, layout.header)
+      ctx.font = '700 13px "方正大黑"'
+      options.headers.forEach((header, i) => {
+        ctx.fillStyle = '#111'
+        ctx.fillText(header, xPositions[i] + options.widths[i] / 2, layout.title + layout.header / 2)
+      })
+
+      options.rows.forEach((row, rowIndex) => {
+        const y = layout.title + layout.header + rowIndex * layout.row
+        ctx.fillStyle = '#ffffff'
+        ctx.fillRect(0, y, layout.width, layout.row)
+        row.values.forEach((value, i) => {
+          const x = xPositions[i]
+          const width = options.widths[i]
+          const header = options.headers[i]
+          const isPoints = header === '积分'
+          const isRaw = header === '素点'
+          const isTeam = i === 1
+          const rankStyle = rankCellStyle(options.stage ?? '', Number(value))
+          if (options.kind === 'team' && i === 0) {
+            ctx.fillStyle = rankStyle.background
+            ctx.fillRect(x, y, width, layout.row)
+          }
+          if (isPoints) {
+            ctx.fillStyle = '#fff5ec'
+            ctx.fillRect(x, y, width, layout.row)
+          }
+          if (row.team && isTeam) {
+            ctx.fillStyle = teamColor(row.team)
+            ctx.fillRect(x, y, width, layout.row)
+          }
+
+          const isNegative = value.startsWith('-') && (isPoints || header === '判罚')
+          ctx.font = `${isRaw ? 'italic ' : ''}${isPoints || (options.kind === 'team' && i === 0) ? '700 16px' : '400 14px'} "方正大黑"`
+          if (row.team && isTeam) {
+            ctx.font = '700 14px "方正大黑"'
+            ctx.fillStyle = lightTeams.has(row.team) ? '#1f2328' : '#fff'
+          } else if (isNegative || (options.kind === 'team' && i === 0 && rankStyle.color === '#cc0000')) {
+            ctx.fillStyle = '#cc0000'
+          } else {
+            ctx.fillStyle = '#111'
+          }
+          ctx.fillText(value, x + width / 2, y + layout.row / 2)
+          if (options.kind === 'team' && isPoints) {
+            ctx.fillStyle = '#1a1a1a'
+            ctx.font = '700 12px "方正大黑"'
+            ctx.textAlign = 'right'
+            ctx.textBaseline = 'bottom'
+            ctx.fillText('pts', x + width - 4, y + layout.row - 3)
+            ctx.textAlign = 'center'
+            ctx.textBaseline = 'middle'
+          }
+        })
+      })
+
+      ctx.strokeStyle = '#171717'
+      ctx.lineWidth = 1
+      ctx.strokeRect(0.5, layout.title + 0.5, layout.width - 1, tableHeight - 1)
+      xPositions.slice(1, -1).forEach((x, index) => {
+        const afterHeader = options.headers[index]
+        const beforeHeader = options.headers[index + 1]
+        ctx.strokeStyle = options.kind === 'team' && /^\d位$/.test(afterHeader) && /^\d位$/.test(beforeHeader)
+          ? 'rgba(23, 23, 23, 0.2)'
+          : '#171717'
+        ctx.beginPath()
+        ctx.moveTo(x + 0.5, layout.title)
+        ctx.lineTo(x + 0.5, layout.title + tableHeight)
+        ctx.stroke()
+      })
+      for (let i = 0; i < options.rows.length; i += 1) {
+        const y = layout.title + layout.header + i * layout.row
+        const nextRank = Number(options.rows[i]?.values[0])
+        const promotionRank = options.stage === '常规赛' ? 6 : options.stage === '半决赛' ? 4 : 0
+        const isPromotionLine = options.kind === 'team' && nextRank === promotionRank + 1
+        ctx.strokeStyle = isPromotionLine ? '#cc0000' : '#171717'
+        ctx.lineWidth = isPromotionLine ? 2 : 1
+        ctx.beginPath()
+        ctx.moveTo(0, y + 0.5)
+        ctx.lineTo(layout.width, y + 0.5)
+        ctx.stroke()
+      }
+
+      ctx.fillStyle = '#1a1a1a'
+      ctx.font = '700 15px "方正大黑"'
+      ctx.textAlign = 'right'
+      ctx.fillText(options.subtitle, layout.width, layout.title + tableHeight + 17)
+      return canvas.toDataURL('image/png')
+    }
+
+    async function currentBoards() {
+      const { data, error } = await supabase.from('games').select('*').eq('status', 'finished')
+      if (error) throw error
+      const games = (data ?? []).filter((game: any) => game.season === season.season).map(mapDbGame)
+      const stageNames = season.stages.map((stage) => stage.name)
+      const stageName = activeStageFromGames(games, stageNames) ?? stageNames[0]
+      const stage = season.stages.find((item) => item.name === stageName)!
+      const byStage = (name: string) => games.filter((game) => game.stage === name)
+      const regTotals = stageTeamTotals(byStage('常规赛'))
+      const semiTotals = stageTeamTotals(byStage('半决赛'))
+      const carry = stageName === '常规赛' ? () => 0 : stageName === '半决赛' ? carryFrom(regTotals) : carryFrom(semiTotals)
+      const stageGames = byStage(stageName)
+      const teamRows = computeTeamBoard(
+        aggregateTeamBoard(stageGames, carry, stageName === '常规赛' ? teamNames : undefined),
+        stage.promoteRank,
+        teamNames,
+      )
+      const playerRows = computePlayerBoard(
+        aggregatePlayerBoard(stageGames, undefined, stageName === '常规赛' ? rosterPairs : undefined),
+        { teamOrder: teamNames, rosterIndex },
+      )
+      return { stage, stageGames, teamRows, playerRows }
+    }
+
+    function showImage(dataUrl: string, filename: string) {
+      exportPreview.src = dataUrl
+      exportPreview.hidden = false
+      exportDownload.href = dataUrl
+      exportDownload.download = filename
+      exportDownload.hidden = false
+    }
+
+    async function exportTeamBoard() {
+      exportStatus.textContent = '正在生成队伍积分表…'
+      const { stage, stageGames, teamRows } = await currentBoards()
+      const regular = stage.name === '常规赛'
+      const headers = regular
+        ? ['顺位', '队伍', '积分', '素点', '差', '晋级线差', '场次', '1位', '2位', '3位', '4位']
+        : ['顺位', '队伍', '积分', `${stage.name}积分`, '持越', '差', stage.name === '决赛' ? '一位差' : '晋级线差', '场次', '1位', '2位', '3位', '4位']
+      const widths = regular
+        ? [50, 92, 115, 76, 45, 68, 55, 55, 55, 55, 54]
+        : [50, 80, 100, 105, 80, 45, 70, 55, 34, 34, 34, 33]
+      const rows = teamRows.map((row) => ({
+        team: row.team,
+        values: regular
+          ? [String(row.rank), row.team, formatScore(row.points), formatScore(row.stageRaw), row.diff == null ? '-' : String(row.diff), signed(row.advDiff), `${row.games}/${stage.totalGames}`, String(row.wins['1']), String(row.wins['2']), String(row.wins['3']), String(row.wins['4'])]
+          : [String(row.rank), row.team, formatScore(row.points), formatScore(row.stagePoints), formatScore(row.carry), row.diff == null ? '-' : String(row.diff), signed(stage.name === '决赛' ? row.firstDiff : row.advDiff), `${row.games}/${stage.totalGames}`, String(row.wins['1']), String(row.wins['2']), String(row.wins['3']), String(row.wins['4'])],
+      }))
+      const dataUrl = drawBoard({
+        kind: 'team',
+        stage: stage.name,
+        title: `PKU M.LEAGUE ${season.season}${stage.name} 团队成绩顺位表`,
+        subtitle: standingsAsOf(stageGames) ?? '暂无已完赛半庄',
+        headers,
+        widths,
+        rows,
+      })
+      showImage(dataUrl, `${season.season}-${stage.name}-队伍积分表.png`)
+      exportStatus.textContent = `已生成 ${stage.name}队伍积分表（${rows.length} 支队伍）`
+    }
+
+    async function exportPlayerBoard() {
+      exportStatus.textContent = '正在生成选手积分表…'
+      const { stage, stageGames, playerRows } = await currentBoards()
+      const headers = ['顺位', '所属', '选手名', '积分', '素点', '判罚', '场次', '平均顺位', '1位', '2位', '3位', '4位', '一位率', '连对率', '避四率', '最高分']
+      const widths = [50, 72, 90, 87, 65, 55, 50, 65, 45, 45, 45, 45, 70, 70, 70, 76]
+      const rows = playerRows.map((row) => ({
+        team: row.team,
+        values: [String(row.rank), row.team, row.name, emptyZero(row.points), emptyZero(row.rawPoints), emptyZero(row.penalty), row.games ? String(row.games) : '', row.avgRank == null ? '' : row.avgRank.toFixed(2), String(row.wins['1'] || ''), String(row.wins['2'] || ''), String(row.wins['3'] || ''), String(row.wins['4'] || ''), row.winRate ? formatPct(row.winRate) : '', row.pairRate ? formatPct(row.pairRate) : '', row.avoidRate ? formatPct(row.avoidRate) : '', row.maxScore ? formatScore(row.maxScore) : ''],
+      }))
+      const dataUrl = drawBoard({
+        kind: 'player',
+        title: `PKU M.LEAGUE ${season.season}${stage.name} 个人成绩顺位表`,
+        subtitle: standingsAsOf(stageGames) ?? '暂无已完赛半庄',
+        headers,
+        widths,
+        rows,
+      })
+      showImage(dataUrl, `${season.season}-${stage.name}-选手积分表.png`)
+      exportStatus.textContent = `已生成 ${stage.name}选手积分表（${rows.length} 位选手）`
+    }
+
+    document.getElementById('export-team-board')?.addEventListener('click', () => {
+      void exportTeamBoard().catch((error) => { exportStatus.textContent = `生成失败：${error?.message ?? String(error)}` })
+    })
+    document.getElementById('export-player-board')?.addEventListener('click', () => {
+      void exportPlayerBoard().catch((error) => { exportStatus.textContent = `生成失败：${error?.message ?? String(error)}` })
+    })
+
     ;(async () => {
       const { data: { session } } = await supabase.auth.getSession()
       const { data: profile } = await supabase

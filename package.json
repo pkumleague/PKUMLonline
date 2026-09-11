@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "astro dev",
+    "dev": "astro dev --host 127.0.0.1 --port 8790 --strictPort",
     "build": "astro build",
     "preview": "astro preview",
     "pages:clean": "powershell -NoProfile -Command \"Remove-Item -LiteralPath '.\\dist' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath '.\\node_modules\\.vite' -Recurse -Force -ErrorAction SilentlyContinue\"",
