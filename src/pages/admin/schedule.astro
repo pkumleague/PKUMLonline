@@ -173,6 +173,12 @@ import StageTabs from '../../components/StageTabs.astro'
     const seatSelects = () => [form.seat0, form.seat1, form.seat2, form.seat3]
     const unarrangedSeatSelects = () => [unarrangedForm.useat0, unarrangedForm.useat1, unarrangedForm.useat2, unarrangedForm.useat3]
 
+    function lockScheduleIdentity(locked: boolean) {
+      form.season.disabled = locked
+      form.stage.disabled = locked
+      seatSelects().forEach((select) => { select.disabled = locked })
+    }
+
     async function scheduleDraftRequest(path = '', options: RequestInit = {}) {
       const token = localStorage.getItem(TOKEN_KEY)
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -441,6 +447,7 @@ import StageTabs from '../../components/StageTabs.astro'
     function startArrange(u: any) {
       editingId = null
       arrangeUnarrangedId = u.id
+      lockScheduleIdentity(false)
       form.season.value = u.season
       form.stage.value = u.stage
       form.date.value = ''
@@ -459,6 +466,7 @@ import StageTabs from '../../components/StageTabs.astro'
     function cancelArrange() {
       arrangeUnarrangedId = null
       editingId = null
+      lockScheduleIdentity(false)
       submitBtn.textContent = '新增'
       cancelArrangeBtn.style.display = 'none'
       arrangeHint.style.display = 'none'
@@ -559,6 +567,7 @@ import StageTabs from '../../components/StageTabs.astro'
           form.round.value = (game.round ?? '').match(/(\d+)/)?.[1] ?? ''
           const seats = game.seats ?? []
           seatSelects().forEach((s, i) => { s.value = seats[i]?.team ?? '' })
+          lockScheduleIdentity(true)
           submitBtn.textContent = '保存'
         }
       }
@@ -589,19 +598,24 @@ import StageTabs from '../../components/StageTabs.astro'
         form.reset(); form.season.value = '26-27'
         return
       }
-      const payload = {
-        season: form.season.value.trim(),
-        stage: form.stage.value,
+      const editableFields = {
         date: form.date.value,
         time: form.time.value.trim() || null,
         round: form.round.value.trim() ? `第${form.round.value.trim()}半庄` : null,
         live_status: form.live.value.trim() || null,
-        seats: buildSeats(teams),
       }
       if (editingId) {
-        gamesCache = gamesCache.map((game) => game.id === editingId ? { ...game, ...payload } : game)
+        // 编辑只更新赛程信息，完整保留原 seats（含已经填写的选手）。
+        gamesCache = gamesCache.map((game) => game.id === editingId ? { ...game, ...editableFields } : game)
         editingId = null; submitBtn.textContent = '新增'
+        lockScheduleIdentity(false)
       } else {
+        const payload = {
+          season: form.season.value.trim(),
+          stage: form.stage.value,
+          ...editableFields,
+          seats: buildSeats(teams),
+        }
         gamesCache.push({ id: crypto.randomUUID(), status: 'upcoming', ...payload })
       }
       const error = await saveScheduleDraft()
