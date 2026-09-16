@@ -178,7 +178,7 @@ const base = import.meta.env.BASE_URL
         ackReadyTimer = window.setTimeout(() => {
           readyAckRevision = revision
           void acknowledgeRevision(revision)
-        }, 3600)
+        }, 7200)
       }
 
       async function pollRemoteState() {
@@ -247,7 +247,7 @@ const base = import.meta.env.BASE_URL
             if (run !== topTransitionRun) return
             updateTopInfo(game, current, state.currentDora ?? [], true, run)
             setDisplayedDealer(dealer)
-          }, 2500)
+          }, 6000)
         }
       }
 
