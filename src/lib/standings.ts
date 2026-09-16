@@ -103,9 +103,9 @@ export interface ComputedPlayerRow extends PlayerBoardRow {
 }
 
 export interface PlayerBoardOptions {
-  /** 固定队伍次序（同分先比队伍次序） */
+  /** 并列选手的固定队伍显示次序（不影响名次） */
   teamOrder?: string[]
-  /** 指名顺序：选手名 -> 队内指名序号（同队同分按此排序） */
+  /** 指名顺序：选手名 -> 队内指名序号（同队并列时按此显示） */
   rosterIndex?: Map<string, number>
 }
 
@@ -113,6 +113,9 @@ export function computePlayerBoard(rows: PlayerBoardRow[], opts?: PlayerBoardOpt
   const teamIdx = new Map((opts?.teamOrder ?? []).map((t, i) => [t, i]))
   const sorted = [...rows].sort((a, b) => {
     if (b.points !== a.points) return b.points - a.points
+    const gamesDiff = gamesPlayed(a.wins) - gamesPlayed(b.wins)
+    if (gamesDiff !== 0) return gamesDiff
+    if (b.wins['1'] !== a.wins['1']) return b.wins['1'] - a.wins['1']
     if (opts?.teamOrder) {
       const ti = (teamIdx.get(a.team) ?? 999) - (teamIdx.get(b.team) ?? 999)
       if (ti !== 0) return ti
@@ -122,13 +125,18 @@ export function computePlayerBoard(rows: PlayerBoardRow[], opts?: PlayerBoardOpt
       }
       return a.name.localeCompare(b.name, 'zh')
     }
-    return b.rawPoints - a.rawPoints || a.name.localeCompare(b.name, 'zh')
+    return a.name.localeCompare(b.name, 'zh')
   })
+  let rank = 0
   return sorted.map((r, i) => {
     const games = gamesPlayed(r.wins)
+    const previous = sorted[i - 1]
+    if (!previous || r.points !== previous.points || games !== gamesPlayed(previous.wins) || r.wins['1'] !== previous.wins['1']) {
+      rank = i + 1
+    }
     return {
       ...r,
-      rank: i + 1,
+      rank,
       games,
       avgRank: avgRank(r.wins, games),
       winRate: rate(r.wins['1'], games),

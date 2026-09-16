@@ -127,6 +127,7 @@ describe('computePlayerBoard 指名顺序', () => {
     ]
     const board = computePlayerBoard(rows, { teamOrder: order, rosterIndex })
     expect(board.map((r) => r.name)).toEqual(['Art3mis', '微汐', '(10)'])
+    expect(board.map((r) => r.rank)).toEqual([1, 1, 1])
   })
 })
 
@@ -168,5 +169,30 @@ describe('computePlayerBoard', () => {
   it('比赛数由位次次数求和', () => {
     const board = computePlayerBoard(rows)
     expect(board[1].games).toBe(4)
+  })
+  it('同分时出场较少优先，即使一位次数较少', () => {
+    const board = computePlayerBoard([
+      { ...rows[0], name: '多场', wins: { '1': 3, '2': 0, '3': 0, '4': 0 } },
+      { ...rows[0], name: '少场', wins: { '1': 0, '2': 1, '3': 0, '4': 0 } },
+    ], { teamOrder: ['海盗'] })
+    expect(board.map((r) => r.name)).toEqual(['少场', '多场'])
+    expect(board.map((r) => r.rank)).toEqual([1, 2])
+  })
+  it('同分且出场相同时，一位次数多者优先', () => {
+    const board = computePlayerBoard([
+      { ...rows[0], name: '少一位', wins: { '1': 1, '2': 2, '3': 0, '4': 0 } },
+      { ...rows[0], name: '多一位', wins: { '1': 2, '2': 1, '3': 0, '4': 0 } },
+    ])
+    expect(board.map((r) => r.name)).toEqual(['多一位', '少一位'])
+    expect(board.map((r) => r.rank)).toEqual([1, 2])
+  })
+  it('三项相同则并列，之后跳号，素点不影响名次', () => {
+    const board = computePlayerBoard([
+      { ...rows[0], name: '第一', points: 100 },
+      { ...rows[0], name: '并列甲', rawPoints: 100 },
+      { ...rows[0], name: '并列乙', rawPoints: 900 },
+      { ...rows[0], name: '第四', points: 40 },
+    ])
+    expect(board.map((r) => r.rank)).toEqual([1, 2, 2, 4])
   })
 })
